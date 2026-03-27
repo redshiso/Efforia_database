@@ -1,3 +1,5 @@
+import re
+import base64
 import streamlit as st
 import mysql.connector
 import pandas as pd
@@ -57,6 +59,28 @@ def update_and_get_views():
     return views
 
 # ─────────────────────────────────────────
+# 記事本文レンダリング（{{image:ラベル}} を画像に置換）
+# ─────────────────────────────────────────
+def render_article_content(content, images_dict):
+    """
+    本文中の {{image:ラベル}} をその位置で画像に置換しながら描画する。
+    images_dict: {label: {'data': base64str, 'mime': str, 'caption': str}}
+    """
+    parts = re.split(r'\{\{image:([^}]+)\}\}', content)
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            if part.strip():
+                st.markdown(part)
+        else:
+            label = part.strip()
+            if label in images_dict:
+                img = images_dict[label]
+                img_bytes = base64.b64decode(img['data'])
+                st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
+            else:
+                st.warning(f"⚠️ 画像 '{{{{image:{label}}}}}' が見つかりません")
+
+# ─────────────────────────────────────────
 # session_state 初期化（ページ管理）
 # ─────────────────────────────────────────
 if 'page' not in st.session_state:
@@ -114,6 +138,18 @@ if st.session_state.page == 'article':
             row = df_article.iloc[0]
             aid = row['article_id']
 
+            # この記事の画像を取得
+            sql_imgs = """
+                SELECT label, caption, image_data, mime_type
+                FROM article_images
+                WHERE article_id = %s
+            """
+            df_imgs = run_query(sql_imgs, [aid])
+            images_dict = {
+                r['label']: {'data': r['image_data'], 'mime': r['mime_type'], 'caption': r['caption']}
+                for _, r in df_imgs.iterrows()
+            }
+
             # 編集モード
             if st.session_state.is_admin and st.session_state.edit_article_id == aid:
                 st.markdown(f"**「{row['title']}」を編集中...**")
@@ -136,14 +172,17 @@ if st.session_state.page == 'article':
                     if col_cancel.form_submit_button("キャンセル"):
                         st.session_state.edit_article_id = None
                         st.rerun()
+
             # 通常表示
             else:
                 st.title(row['title'])
                 st.caption(f"公開日時: {row['post_date']}")
                 st.markdown("---")
-                st.markdown(row['content'])
 
-                # 管理者ボタン
+                # {{image:ラベル}} を画像に置換しながら本文を描画
+                render_article_content(row['content'], images_dict)
+
+                # 管理者ボタン（編集・削除）
                 if st.session_state.is_admin:
                     st.markdown("---")
                     col1, col2, _ = st.columns([1, 1, 8])
@@ -153,12 +192,78 @@ if st.session_state.page == 'article':
                     if col2.button("🗑️ 削除"):
                         conn = get_connection()
                         cursor = conn.cursor()
+                        cursor.execute("DELETE FROM article_images WHERE article_id = %s", (aid,))
                         cursor.execute("DELETE FROM articles WHERE article_id = %s", (aid,))
                         conn.commit()
                         cursor.close()
                         conn.close()
                         go_list_article_tab()
                         st.rerun()
+
+                    # ── 画像管理 ──────────────────────────────
+                    st.markdown("---")
+                    st.subheader("🖼️ 画像管理")
+                    st.caption("本文中に `{{image:ラベル}}` と書くと、その位置に画像が表示されます。")
+
+                    # 登録済み画像の一覧
+                    sql_imgs_admin = """
+                        SELECT image_id, label, caption
+                        FROM article_images
+                        WHERE article_id = %s
+                        ORDER BY image_id
+                    """
+                    df_imgs_admin = run_query(sql_imgs_admin, [aid])
+                    if not df_imgs_admin.empty:
+                        st.markdown("**登録済み画像**")
+                        for _, img_row in df_imgs_admin.iterrows():
+                            col_lbl, col_del = st.columns([9, 1])
+                            cap = img_row['caption'] or '（キャプションなし）'
+                            col_lbl.markdown(f"`{{{{image:{img_row['label']}}}}}` — {cap}")
+                            if col_del.button("🗑️", key=f"del_img_{img_row['image_id']}"):
+                                conn = get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "DELETE FROM article_images WHERE image_id = %s",
+                                    (img_row['image_id'],)
+                                )
+                                conn.commit()
+                                cursor.close()
+                                conn.close()
+                                st.rerun()
+
+                    # 画像アップロード
+                    with st.expander("＋ 画像をアップロード"):
+                        label_input   = st.text_input(
+                            "ラベル（半角英数字推奨）",
+                            key=f"img_label_{aid}",
+                            help="例: fig1　→ 本文中に {{image:fig1}} と記述"
+                        )
+                        caption_input = st.text_input("キャプション（任意）", key=f"img_caption_{aid}")
+                        uploaded      = st.file_uploader(
+                            "画像ファイル",
+                            type=["png", "jpg", "jpeg", "gif", "webp"],
+                            key=f"img_upload_{aid}"
+                        )
+                        if st.button("アップロード", key=f"img_upload_btn_{aid}"):
+                            if uploaded and label_input:
+                                img_bytes = uploaded.read()
+                                img_b64   = base64.b64encode(img_bytes).decode('utf-8')
+                                mime_type = uploaded.type
+                                conn = get_connection()
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "INSERT INTO article_images (article_id, label, caption, image_data, mime_type) "
+                                    "VALUES (%s, %s, %s, %s, %s)",
+                                    (aid, label_input, caption_input or None, img_b64, mime_type)
+                                )
+                                conn.commit()
+                                cursor.close()
+                                conn.close()
+                                st.success(f"アップロード完了。本文中に `{{{{image:{label_input}}}}}` と記述すると表示されます。")
+                                st.rerun()
+                            else:
+                                st.warning("ラベルと画像ファイルを指定してください。")
+
     except Exception as e:
         st.error(f"記事の読み込みに失敗しました: {e}")
 
@@ -578,6 +683,7 @@ else:
                         if col_btn.button("🗑️", key=f"del_{aid}"):
                             conn = get_connection()
                             cursor = conn.cursor()
+                            cursor.execute("DELETE FROM article_images WHERE article_id = %s", (aid,))
                             cursor.execute("DELETE FROM articles WHERE article_id = %s", (aid,))
                             conn.commit()
                             cursor.close()
