@@ -136,7 +136,7 @@ if st.session_state.page == 'article':
             st.warning("記事が見つかりませんでした。")
         else:
             row = df_article.iloc[0]
-            aid = row['article_id']
+            aid = int(row['article_id'])
 
             # この記事の画像を取得
             sql_imgs = """
