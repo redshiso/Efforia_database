@@ -63,7 +63,8 @@ def update_and_get_views():
 # ─────────────────────────────────────────
 def render_article_content(content, images_dict):
     """
-    本文中の {{image:ラベル}} をその位置で画像に置換しながら描画する。
+    本文中の {{image:ラベル}} または {{image:ラベル:サイズ}} を画像に置換しながら描画する。
+    サイズ例: 50%, 300px（省略時は全幅）
     images_dict: {label: {'data': base64str, 'mime': str, 'caption': str}}
     """
     parts = re.split(r'\{\{image:([^}]+)\}\}', content)
@@ -72,11 +73,23 @@ def render_article_content(content, images_dict):
             if part.strip():
                 st.markdown(part)
         else:
-            label = part.strip()
+            tokens = part.strip().split(':', 1)
+            label = tokens[0]
+            size  = tokens[1] if len(tokens) > 1 else None
+
             if label in images_dict:
                 img = images_dict[label]
-                img_bytes = base64.b64decode(img['data'])
-                st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
+                if size:
+                    caption_html = f'<br><small>{img["caption"]}</small>' if img['caption'] else ''
+                    st.markdown(
+                        f'<div style="text-align:center">'
+                        f'<img src="data:{img["mime"]};base64,{img["data"]}" style="width:{size};">'
+                        f'{caption_html}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    img_bytes = base64.b64decode(img['data'])
+                    st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
             else:
                 st.warning(f"⚠️ 画像 '{{{{image:{label}}}}}' が見つかりません")
 
@@ -203,7 +216,7 @@ if st.session_state.page == 'article':
                     # ── 画像管理 ──────────────────────────────
                     st.markdown("---")
                     st.subheader("🖼️ 画像管理")
-                    st.caption("本文中に `{{image:ラベル}}` と書くと、その位置に画像が表示されます。")
+                    st.caption("本文中に `{{image:ラベル}}` で全幅表示、`{{image:ラベル:50%}}` のようにサイズ指定も可能です。")
 
                     # 登録済み画像の一覧
                     sql_imgs_admin = """
