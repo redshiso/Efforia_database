@@ -71,7 +71,7 @@ def render_article_content(content, images_dict):
     for i, part in enumerate(parts):
         if i % 2 == 0:
             if part.strip():
-                st.markdown(part)
+                st.markdown(part, unsafe_allow_html=True)
         else:
             tokens = part.strip().split(':', 1)
             label = tokens[0]
@@ -471,7 +471,7 @@ else:
                     else:
                         st.warning("タイトルと本文を入力してください。")
 
-    tab1, tab2, tab3 = st.tabs(["産駒一覧", "レース成績検索", "記事・コラム"])
+    tab1, tab2, tab3, tab4 = st.tabs(["産駒一覧", "レース成績検索", "🔍 カスタム分析", "記事・コラム"])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
     with tab1:
@@ -664,8 +664,153 @@ else:
                 except Exception as e:
                     st.error(f"エラーが発生しました: {e}")
 
-    # ── TAB 3: コラム・記事 ─────────────────────────
+    # ── TAB 3: カスタム分析 ────────────────────────
     with tab3:
+        st.subheader("🔍 カスタム分析")
+        st.caption("X軸・指標・絞り込み条件を自由に組み合わせてグラフと表を生成します")
+
+        # ── コントロール ──────────────────────────
+        ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
+        axis_label   = ctrl1.selectbox(
+            "X軸（集計軸）",
+            ['生産者', '母父', '騎手', '競馬場', '馬場種別', '馬場状態', 'クラス', '距離帯'],
+            key="custom_axis"
+        )
+        metric_label = ctrl2.selectbox(
+            "指標",
+            ['出走数', '勝利数', '連対数', '3着内数', '勝率(%)', '連対率(%)', '複勝率(%)'],
+            key="custom_metric"
+        )
+        min_runs = ctrl3.number_input(
+            "最低出走数", min_value=1, max_value=200, value=5, step=1, key="custom_min_runs"
+        )
+
+        # ── 絞り込み条件 ──────────────────────────
+        with st.expander("🔽 絞り込み条件"):
+            f1, f2 = st.columns(2)
+            surface_filter   = f1.multiselect("馬場種別", ['芝', 'ダート'], default=[], key="custom_surface")
+            condition_filter = f2.multiselect("馬場状態", ['良', '稍重', '重', '不良'], default=[], key="custom_condition")
+            d1, d2 = st.columns(2)
+            dist_from = d1.number_input("距離 From (m)", min_value=800,  max_value=4300, value=800,  step=100, key="custom_dist_from")
+            dist_to   = d2.number_input("距離 To (m)",   min_value=800,  max_value=4300, value=3600, step=100, key="custom_dist_to")
+            y1, y2 = st.columns(2)
+            year_from = y1.number_input("開催年 From", min_value=2024, max_value=2035, value=2024, step=1, key="custom_year_from")
+            year_to   = y2.number_input("開催年 To",   min_value=2024, max_value=2035, value=2026, step=1, key="custom_year_to")
+
+        # ── X軸の定義 ─────────────────────────────
+        AXIS_CONFIG = {
+            '生産者': dict(
+                select="COALESCE(b.breeder_name, '不明') AS 軸",
+                extra_join="LEFT JOIN breeders b ON h.breeder_id = b.breeder_id",
+                group="COALESCE(b.breeder_name, '不明')"
+            ),
+            '母父': dict(
+                select="COALESCE(hf.broodmare_sire_name, '不明') AS 軸",
+                extra_join="LEFT JOIN horses_formatted hf ON h.horse_id = hf.horse_id",
+                group="COALESCE(hf.broodmare_sire_name, '不明')"
+            ),
+            '騎手': dict(
+                select="COALESCE(j.jockey_name, '不明') AS 軸",
+                extra_join="LEFT JOIN jockeys j ON re.jockey_id = j.jockey_id",
+                group="COALESCE(j.jockey_name, '不明')"
+            ),
+            '競馬場': dict(
+                select="t.track_name AS 軸",
+                extra_join="",
+                group="t.track_name"
+            ),
+            '馬場種別': dict(
+                select="r.surface_type AS 軸",
+                extra_join="",
+                group="r.surface_type"
+            ),
+            '馬場状態': dict(
+                select="r.track_condition AS 軸",
+                extra_join="",
+                group="r.track_condition"
+            ),
+            'クラス': dict(
+                select="r.race_class AS 軸",
+                extra_join="",
+                group="r.race_class"
+            ),
+            '距離区分': dict(
+                select="""CASE
+                    WHEN r.distance_meters < 1301 THEN '短距離(~1300m)'
+                    WHEN r.distance_meters < 1900 THEN 'マイル(1301~1899m)'
+                    WHEN r.distance_meters < 2101 THEN '中距離(1900~2100m)'
+                    ELSE '長距離(2101m~)' END AS 軸""",
+                extra_join="",
+                group="""CASE
+                    WHEN r.distance_meters < 1301 THEN '短距離(~1300m)'
+                    WHEN r.distance_meters < 1900 THEN 'マイル(1301~1899m)'
+                    WHEN r.distance_meters < 2101 THEN '中距離(1900~2100m)'
+                    ELSE '長距離(2101m~)' END"""
+            ),
+        }
+
+        axis_cfg = AXIS_CONFIG[axis_label]
+
+        # ── SQLを組み立て ─────────────────────────
+        sql_custom = f"""
+            SELECT
+                {axis_cfg['select']},
+                COUNT(re.entry_id)                                              AS 出走数,
+                SUM(CASE WHEN re.final_rank = 1  THEN 1 ELSE 0 END)            AS 勝利数,
+                SUM(CASE WHEN re.final_rank <= 2 THEN 1 ELSE 0 END)            AS 連対数,
+                SUM(CASE WHEN re.final_rank <= 3 THEN 1 ELSE 0 END)            AS 複勝数
+            FROM horses h
+            JOIN raceentries re ON h.horse_id = re.horse_id
+            JOIN races r        ON re.race_id  = r.race_id
+            JOIN tracks t       ON r.track_id  = t.track_id
+            {axis_cfg['extra_join']}
+            WHERE h.sire_id = 222
+              AND r.distance_meters BETWEEN %s AND %s
+              AND YEAR(r.race_date) BETWEEN %s AND %s
+        """
+        custom_params = [dist_from, dist_to, year_from, year_to]
+
+        if surface_filter:
+            sql_custom += " AND r.surface_type IN ({})".format(','.join(['%s'] * len(surface_filter)))
+            custom_params.extend(surface_filter)
+        if condition_filter:
+            sql_custom += " AND r.track_condition IN ({})".format(','.join(['%s'] * len(condition_filter)))
+            custom_params.extend(condition_filter)
+
+        sql_custom += f" GROUP BY {axis_cfg['group']} HAVING COUNT(re.entry_id) >= %s"
+        custom_params.append(min_runs)
+
+        try:
+            import altair as alt
+            df_custom = run_query(sql_custom, custom_params)
+
+            if df_custom.empty:
+                st.info("条件に合うデータがありません。絞り込み条件を緩めてください。")
+            else:
+                df_custom['3着内数']   = df_custom['複勝数']
+                df_custom['勝率(%)']  = (df_custom['勝利数'] / df_custom['出走数'] * 100).round(1)
+                df_custom['連対率(%)'] = (df_custom['連対数'] / df_custom['出走数'] * 100).round(1)
+                df_custom['複勝率(%)'] = (df_custom['複勝数'] / df_custom['出走数'] * 100).round(1)
+                df_custom = df_custom.sort_values(by=metric_label, ascending=False)
+
+                chart = alt.Chart(df_custom).mark_bar().encode(
+                    x=alt.X('軸:N', sort=df_custom['軸'].tolist(), title=axis_label,
+                            axis=alt.Axis(labelAngle=-45, labelOverlap=False)),
+                    y=alt.Y(f'{metric_label}:Q', title=metric_label),
+                    tooltip=['軸', '出走数', '勝率(%)', '連対率(%)', '複勝率(%)']
+                ).properties(height=400)
+                st.altair_chart(chart, use_container_width=True)
+
+                st.dataframe(
+                    df_custom[['軸', '出走数', '勝利数', '連対数', '3着内数', '勝率(%)', '連対率(%)', '複勝率(%)']].rename(columns={'軸': axis_label}),
+                    use_container_width=True,
+                    hide_index=True
+                )
+        except Exception as e:
+            st.error(f"分析に失敗しました: {e}")
+
+    # ── TAB 4: コラム・記事 ─────────────────────────
+    with tab4:
         st.subheader("📝 エフフォーリア産駒に関する考察・コラム")
         st.markdown("---")
 
