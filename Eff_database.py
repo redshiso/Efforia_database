@@ -6,15 +6,26 @@ import pandas as pd
 
 st.set_page_config(page_title="エフフォーリア産駒データベース", layout="wide")
 
-# ボタンの馬名が折り返されないようにするCSS
+# 馬名ボタンをカード風に表示するCSS
 st.markdown("""
 <style>
-div[data-testid="column"]:first-child button {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    width: 100%;
-    min-width: 120px;
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
+    border: 2px solid #1a73e8 !important;
+    border-radius: 6px !important;
+    color: #1a73e8 !important;
+    background: #f0f4ff !important;
+    background-color: #f0f4ff !important;
+    font-weight: 500 !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    width: 100% !important;
+    min-width: 120px !important;
+}
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
+    background: #1a73e8 !important;
+    background-color: #1a73e8 !important;
+    color: white !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -91,7 +102,7 @@ def render_article_content(content, images_dict):
                     img_bytes = base64.b64decode(img['data'])
                     st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
             else:
-                st.warning(f"⚠️ 画像 '{{{{image:{label}}}}}' が見つかりません")
+                st.warning(f" 画像 '{{{{image:{label}}}}}' が見つかりません")
 
 # ─────────────────────────────────────────
 # session_state 初期化（ページ管理）
@@ -199,10 +210,10 @@ if st.session_state.page == 'article':
                 if st.session_state.is_admin:
                     st.markdown("---")
                     col1, col2, _ = st.columns([1, 1, 8])
-                    if col1.button("✏️ 編集"):
+                    if col1.button("編集"):
                         st.session_state.edit_article_id = aid
                         st.rerun()
-                    if col2.button("🗑️ 削除"):
+                    if col2.button("削除"):
                         conn = get_connection()
                         cursor = conn.cursor()
                         cursor.execute("DELETE FROM article_images WHERE article_id = %s", (aid,))
@@ -215,7 +226,7 @@ if st.session_state.page == 'article':
 
                     # ── 画像管理 ──────────────────────────────
                     st.markdown("---")
-                    st.subheader("🖼️ 画像管理")
+                    st.subheader("画像管理")
                     st.caption("本文中に `{{image:ラベル}}` で全幅表示、`{{image:ラベル:50%}}` のようにサイズ指定も可能です。")
 
                     # 登録済み画像の一覧
@@ -288,9 +299,10 @@ elif st.session_state.page == 'detail':
     horse_name = st.session_state.selected_horse_name
 
     st.button("← 一覧に戻る", on_click=go_list)
-    st.title(f"🐴 {horse_name}")
+    st.title(f"{horse_name}")
     st.markdown("---")
 
+    # ── 写真 ＋ 基本情報 ＋ 血統 ─────────────────────
     sql_profile = """
         SELECT
             hf.date_of_birth       AS 生年月日,
@@ -311,28 +323,81 @@ elif st.session_state.page == 'detail':
         df_profile = run_query(sql_profile, [horse_id])
         if not df_profile.empty:
             p = df_profile.iloc[0]
-            col_info, col_blood = st.columns(2)
+
+            # 写真を取得
+            sql_horse_img = "SELECT image_data, mime_type FROM horse_images WHERE horse_id = %s"
+            df_horse_img  = run_query(sql_horse_img, [horse_id])
+
+            col_photo, col_info, col_blood = st.columns([2, 3, 3])
+
+            # 写真欄
+            with col_photo:
+                st.subheader("写真")
+                if not df_horse_img.empty:
+                    img_row   = df_horse_img.iloc[0]
+                    img_bytes = base64.b64decode(img_row['image_data'])
+                    st.image(img_bytes, use_container_width=True)
+                    # 管理者：写真削除
+                    if st.session_state.is_admin:
+                        if st.button("🗑️ 写真を削除", key="del_horse_img"):
+                            conn = get_connection()
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM horse_images WHERE horse_id = %s", (horse_id,))
+                            conn.commit()
+                            cursor.close()
+                            conn.close()
+                            st.rerun()
+                else:
+                    st.markdown(
+                        "<div style='border:2px dashed #ccc; border-radius:8px; "
+                        "height:180px; display:flex; align-items:center; "
+                        "justify-content:center; color:#aaa; font-size:0.9em;'>"
+                        "No Image</div>",
+                        unsafe_allow_html=True
+                    )
+                    # 管理者：写真アップロード
+                    if st.session_state.is_admin:
+                        uploaded_horse = st.file_uploader(
+                            "写真をアップロード",
+                            type=["png", "jpg", "jpeg", "webp"],
+                            key="horse_img_upload"
+                        )
+                        if uploaded_horse:
+                            img_b64  = base64.b64encode(uploaded_horse.read()).decode('utf-8')
+                            mime     = uploaded_horse.type
+                            conn     = get_connection()
+                            cursor   = conn.cursor()
+                            cursor.execute(
+                                "INSERT INTO horse_images (horse_id, image_data, mime_type) "
+                                "VALUES (%s, %s, %s)",
+                                (horse_id, img_b64, mime)
+                            )
+                            conn.commit()
+                            cursor.close()
+                            conn.close()
+                            st.rerun()
+
             with col_info:
                 st.subheader("基本情報")
                 st.markdown(f"""
-| 項目 | 内容 |
-|------|------|
-| 生年月日 | {p['生年月日']} |
-| 性別 | {p['性別']} |
-| 毛色 | {p['毛色'] or '―'} |
-| 馬主 | {p['馬主'] or '―'} |
-| 生産者 | {p['生産者'] or '―'} |
-| 調教師 | {p['調教師'] or '―'} |
-""")
+<table style="width:100%; border-collapse:collapse;">
+<tr><td style="padding:4px 8px; color:#888; width:40%;">生年月日</td><td style="padding:4px 8px;">{p['生年月日']}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">性別</td><td style="padding:4px 8px;">{p['性別']}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">毛色</td><td style="padding:4px 8px;">{p['毛色'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">馬主</td><td style="padding:4px 8px;">{p['馬主'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">生産者</td><td style="padding:4px 8px;">{p['生産者'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">調教師</td><td style="padding:4px 8px;">{p['調教師'] or '―'}</td></tr>
+</table>
+""", unsafe_allow_html=True)
             with col_blood:
                 st.subheader("血統")
                 st.markdown(f"""
-| 項目 | 内容 |
-|------|------|
-| 父 | {p['父'] or '―'} |
-| 母 | {p['母'] or '―'} |
-| 母父 | {p['母父'] or '―'} |
-""")
+<table style="width:100%; border-collapse:collapse;">
+<tr><td style="padding:4px 8px; color:#888; width:40%;">父</td><td style="padding:4px 8px;">{p['父'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">母</td><td style="padding:4px 8px;">{p['母'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">母父</td><td style="padding:4px 8px;">{p['母父'] or '―'}</td></tr>
+</table>
+""", unsafe_allow_html=True)
     except Exception as e:
         st.error(f"基本情報の取得に失敗しました: {e}")
 
@@ -419,7 +484,7 @@ else:
     # ── サイドバー ──────────────────────────────────
     st.sidebar.markdown("---")
     total_views = update_and_get_views()
-    st.sidebar.caption(f"あなたは: {total_views} 人目の訪問者です。")
+    st.sidebar.caption(f"あなたは: {total_views} 人目の武史です。")
 
     st.sidebar.header("検索条件")
     horse_name_input = st.sidebar.text_input("馬名（一部でも可）", value="")
@@ -433,7 +498,7 @@ else:
 
     # ── 管理者メニュー ──────────────────────────────
     st.sidebar.markdown("---")
-    with st.sidebar.expander("🛠 管理者メニュー"):
+    with st.sidebar.expander(" 管理者メニュー"):
         if not st.session_state.is_admin:
             admin_password  = st.text_input("管理者パスワード", type="password", key="admin_pass")
             SECRET_PASSWORD = st.secrets["ADMIN_PASSWORD"]
@@ -471,7 +536,7 @@ else:
                     else:
                         st.warning("タイトルと本文を入力してください。")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["産駒一覧", "レース成績検索", "🔍 カスタム分析", "記事・コラム"])
+    tab1, tab2, tab3, tab4 = st.tabs(["産駒一覧", "レース成績検索", "カスタム分析", "記事・コラム"])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
     with tab1:
@@ -519,7 +584,7 @@ else:
             st.write(f"検索結果: **{len(df_horses)}** 頭")
 
             if not df_horses.empty:
-                h0, h1, h2, h3, h4, h5 = st.columns([2, 2, 1, 1, 2, 1.5])
+                h0, h1, h2, h3, h4, h5 = st.columns([3, 2, 1, 1, 2, 1])
                 h0.markdown("**馬名**")
                 h1.markdown("**生年月日**")
                 h2.markdown("**性別**")
@@ -529,7 +594,7 @@ else:
                 st.markdown("---")
 
                 for _, row in df_horses.iterrows():
-                    c0, c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 2, 1.5])
+                    c0, c1, c2, c3, c4, c5 = st.columns([3, 2, 1, 1, 2, 1])
                     c0.button(
                         row['馬名'],
                         key=f"btn_{row['horse_id']}",
@@ -666,7 +731,7 @@ else:
 
     # ── TAB 3: カスタム分析 ────────────────────────
     with tab3:
-        st.subheader("🔍 カスタム分析")
+        st.subheader("カスタム分析")
         st.caption("X軸・指標・絞り込み条件を自由に組み合わせてグラフと表を生成します")
 
         # ── コントロール ──────────────────────────
@@ -686,7 +751,7 @@ else:
         )
 
         # ── 絞り込み条件 ──────────────────────────
-        with st.expander("🔽 絞り込み条件"):
+        with st.expander("絞り込み条件"):
             f1, f2 = st.columns(2)
             surface_filter   = f1.multiselect("馬場種別", ['芝', 'ダート'], default=[], key="custom_surface")
             condition_filter = f2.multiselect("馬場状態", ['良', '稍重', '重', '不良'], default=[], key="custom_condition")
@@ -811,7 +876,7 @@ else:
 
     # ── TAB 4: コラム・記事 ─────────────────────────
     with tab4:
-        st.subheader("📝 エフフォーリア産駒に関する考察・コラム")
+        st.subheader("エフフォーリア産駒に関する考察・コラム")
         st.markdown("---")
 
         sql_articles = """
