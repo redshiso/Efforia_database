@@ -339,7 +339,7 @@ elif st.session_state.page == 'detail':
                     st.image(img_bytes, use_container_width=True)
                     # 管理者：写真削除
                     if st.session_state.is_admin:
-                        if st.button("🗑️ 写真を削除", key="del_horse_img"):
+                        if st.button("写真を削除", key="del_horse_img"):
                             conn = get_connection()
                             cursor = conn.cursor()
                             cursor.execute("DELETE FROM horse_images WHERE horse_id = %s", (horse_id,))
@@ -536,7 +536,7 @@ else:
                     else:
                         st.warning("タイトルと本文を入力してください。")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["産駒一覧", "レース成績検索", "カスタム分析", "記事・コラム"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["産駒一覧", "レース成績検索", "カスタム分析", "条件検索", "記事・コラム"])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
     with tab1:
@@ -875,7 +875,147 @@ else:
             st.error(f"分析に失敗しました: {e}")
 
     # ── TAB 4: コラム・記事 ─────────────────────────
+    # ── TAB 4: 条件検索 ────────────────────────────
     with tab4:
+        st.subheader(" 条件を指定して戦績を検索")
+        st.caption("複数の条件を組み合わせて出走履歴と統計を表示します。条件を指定しない項目は全て対象になります。")
+        st.markdown("---")
+
+        # ── 絞り込み条件 ──────────────────────────
+        with st.expander(" 絞り込み条件", expanded=True):
+            fc1, fc2, fc3 = st.columns(3)
+
+            surface_sel   = fc1.multiselect("馬場種別", ["芝", "ダート"], key="cs_surface")
+            condition_sel = fc2.multiselect("馬場状態", ["良", "稍重", "重", "不良"], key="cs_condition")
+            gender_sel    = fc3.multiselect("性別", ["牡", "牝", "騸"], key="cs_gender")
+
+            fd1, fd2, fd3 = st.columns(3)
+            dist_from = fd1.number_input("距離 From (m)", min_value=800, max_value=4300, value=800,  step=100, key="cs_dist_from")
+            dist_to   = fd2.number_input("距離 To (m)",   min_value=800, max_value=4300, value=4300, step=100, key="cs_dist_to")
+            class_sel = fd3.multiselect("クラス", ["新馬", "未勝利", "1勝クラス", "2勝クラス", "3勝クラス", "オープン", "G3", "G2", "G1"], key="cs_class")
+
+            fy1, fy2, fy3 = st.columns(3)
+            year_from    = fy1.number_input("開催年 From", min_value=2020, max_value=2030, value=2024, step=1, key="cs_year_from")
+            year_to      = fy2.number_input("開催年 To",   min_value=2020, max_value=2030, value=2026, step=1, key="cs_year_to")
+            style_sel    = fy3.multiselect("脚質", ["逃げ", "先行", "差し", "追込"], key="cs_style")
+
+            # 競馬場・形態の選択肢をDBから取得
+            try:
+                df_tracks_opt = run_query("SELECT DISTINCT track_name FROM tracks ORDER BY track_name")
+                df_dir_opt    = run_query("SELECT DISTINCT course_direction FROM tracks WHERE course_direction IS NOT NULL ORDER BY course_direction")
+                track_options = df_tracks_opt['track_name'].tolist()
+                dir_options   = df_dir_opt['course_direction'].tolist()
+            except Exception:
+                track_options = []
+                dir_options   = []
+
+            ft1, ft2 = st.columns(2)
+            track_sel = ft1.multiselect("競馬場", track_options, key="cs_track")
+            dir_sel   = ft2.multiselect("形態（コース方向）", dir_options, key="cs_dir")
+
+            fj1, fj2 = st.columns(2)
+            jockey_input  = fj1.text_input("騎手名（部分一致）", key="cs_jockey")
+            trainer_input = fj2.text_input("調教師名（部分一致）", key="cs_trainer")
+
+        # ── SQL組み立て ───────────────────────────
+        sql_cs = """
+            SELECT
+                h.horse_name       AS 馬名,
+                h.gender           AS 性別,
+                r.race_date        AS 開催日,
+                r.race_name        AS レース名,
+                t.track_name       AS 競馬場,
+                t.course_direction AS コース方向,
+                r.distance_meters  AS 距離_m,
+                r.surface_type     AS 馬場種別,
+                r.track_condition  AS 馬場状態,
+                r.race_class       AS クラス,
+                re.final_rank      AS 着順,
+                re.time_seconds    AS タイム_秒,
+                re.running_style   AS 脚質,
+                re.race_pace       AS ペース,
+                re.Weight          AS 斤量,
+                j.jockey_name      AS 騎手,
+                tr.trainer_name    AS 調教師
+            FROM raceentries re
+            JOIN horses  h  ON re.horse_id  = h.horse_id
+            JOIN races   r  ON re.race_id   = r.race_id
+            JOIN tracks  t  ON r.track_id   = t.track_id
+            LEFT JOIN jockeys  j  ON re.jockey_id  = j.jockey_id
+            LEFT JOIN trainers tr ON re.trainer_id = tr.trainer_id
+            WHERE h.sire_id = 222
+              AND r.distance_meters BETWEEN %s AND %s
+              AND YEAR(r.race_date)  BETWEEN %s AND %s
+        """
+        cs_params = [dist_from, dist_to, year_from, year_to]
+
+        if surface_sel:
+            sql_cs += f" AND r.surface_type IN ({','.join(['%s']*len(surface_sel))})"
+            cs_params.extend(surface_sel)
+        if condition_sel:
+            sql_cs += f" AND r.track_condition IN ({','.join(['%s']*len(condition_sel))})"
+            cs_params.extend(condition_sel)
+        if gender_sel:
+            sql_cs += f" AND h.gender IN ({','.join(['%s']*len(gender_sel))})"
+            cs_params.extend(gender_sel)
+        if class_sel:
+            sql_cs += f" AND r.race_class IN ({','.join(['%s']*len(class_sel))})"
+            cs_params.extend(class_sel)
+        if style_sel:
+            sql_cs += f" AND re.running_style IN ({','.join(['%s']*len(style_sel))})"
+            cs_params.extend(style_sel)
+        if track_sel:
+            sql_cs += f" AND t.track_name IN ({','.join(['%s']*len(track_sel))})"
+            cs_params.extend(track_sel)
+        if dir_sel:
+            sql_cs += f" AND t.course_direction IN ({','.join(['%s']*len(dir_sel))})"
+            cs_params.extend(dir_sel)
+        if jockey_input:
+            sql_cs += " AND j.jockey_name LIKE %s"
+            cs_params.append(f"%{jockey_input}%")
+        if trainer_input:
+            sql_cs += " AND tr.trainer_name LIKE %s"
+            cs_params.append(f"%{trainer_input}%")
+
+        sql_cs += " ORDER BY r.race_date DESC"
+
+        try:
+            df_cs = run_query(sql_cs, cs_params)
+
+            if df_cs.empty:
+                st.info("条件に合う出走記録が見つかりませんでした。")
+            else:
+                # ── 統計サマリー ──────────────────────
+                rank_series = pd.to_numeric(df_cs['着順'], errors='coerce')
+                total = len(df_cs)
+                w1 = int((rank_series == 1).sum())
+                w2 = int((rank_series == 2).sum())
+                w3 = int((rank_series == 3).sum())
+                w4 = int((rank_series >= 4).sum())
+
+                st.markdown(
+                    f"### {total}戦{w1}勝　"
+                    f"<span style='font-size:1.1em; color:#555;'>({w1}-{w2}-{w3}-{w4})</span>",
+                    unsafe_allow_html=True
+                )
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("出走数",   f"{total}回")
+                m2.metric("勝率",    f"{w1/total*100:.1f}%")
+                m3.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
+                m4.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
+                m5.metric("3着内数", f"{w1+w2+w3}回")
+
+                st.markdown("---")
+
+                # ── 出走履歴テーブル ──────────────────
+                st.subheader(f"出走履歴（{total}件）")
+                st.dataframe(df_cs, use_container_width=True, hide_index=True)
+
+        except Exception as e:
+            st.error(f"検索に失敗しました: {e}")
+
+    # ── TAB 5: コラム・記事 ─────────────────────────
+    with tab5:
         st.subheader("エフフォーリア産駒に関する考察・コラム")
         st.markdown("---")
 
@@ -914,7 +1054,7 @@ else:
                             st.rerun()
                     else:
                         st.button(
-                            f"📄 {row['title']}",
+                            f" {row['title']}",
                             key=f"article_btn_{aid}",
                             on_click=go_article,
                             args=(aid,),
