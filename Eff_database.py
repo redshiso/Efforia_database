@@ -3,10 +3,10 @@ import base64
 import streamlit as st
 import mysql.connector
 import pandas as pd
+import altair as alt
 
 st.set_page_config(page_title="エフフォーリア産駒データベース", layout="wide")
 
-# 馬名ボタンをカード風に表示するCSS
 st.markdown("""
 <style>
 div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
@@ -27,20 +27,30 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
     background-color: #1a73e8 !important;
     color: white !important;
 }
+.analysis-card {
+    background: #f0f6ff; border-left: 4px solid #4a90d9;
+    border-radius: 0 8px 8px 0; padding: 16px 20px;
+    margin: 16px 0; font-size: 0.97em; line-height: 1.8; color: #222;
+}
+.note-box {
+    background: #fffbf0; border-left: 4px solid #f0a500;
+    border-radius: 0 8px 8px 0; padding: 16px 20px;
+    margin: 16px 0; font-size: 0.95em; line-height: 1.8; color: #333;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# DB接続設定
+# DB接続
 # ─────────────────────────────────────────
 db_config = {
-    'user': st.secrets["DB_USER"],
-    'password': st.secrets["DB_PASSWORD"],
-    'host': st.secrets["DB_HOST"],
-    'port': st.secrets["DB_PORT"],
-    'database': st.secrets["DB_NAME"],
-    'ssl_disabled': False,
-    'ssl_verify_cert': False,
+    'user':                st.secrets["DB_USER"],
+    'password':            st.secrets["DB_PASSWORD"],
+    'host':                st.secrets["DB_HOST"],
+    'port':                st.secrets["DB_PORT"],
+    'database':            st.secrets["DB_NAME"],
+    'ssl_disabled':        False,
+    'ssl_verify_cert':     False,
     'ssl_verify_identity': False
 }
 
@@ -53,41 +63,213 @@ def run_query(sql, params=None):
     conn.close()
     return df
 
-# ─────────────────────────────────────────
-# アクセスカウンター関数
-# ─────────────────────────────────────────
-def update_and_get_views():
+def run_write(sql, params=None):
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute(sql, params or [])
+    conn.commit(); cursor.close(); conn.close()
+
+# ─────────────────────────────────────────
+# アクセスカウンター
+# ─────────────────────────────────────────
+def update_and_get_views():
+    conn = get_connection(); cursor = conn.cursor()
     if 'visited' not in st.session_state:
-        cursor.execute("UPDATE page_views SET views = views + 1 WHERE id = 1")
-        conn.commit()
-        st.session_state.visited = True
-    cursor.execute("SELECT views FROM page_views WHERE id = 1")
+        cursor.execute("UPDATE page_views SET views=views+1 WHERE id=1")
+        conn.commit(); st.session_state.visited = True
+    cursor.execute("SELECT views FROM page_views WHERE id=1")
     views = cursor.fetchone()[0]
-    cursor.close()
-    conn.close()
+    cursor.close(); conn.close()
     return views
 
 # ─────────────────────────────────────────
-# 記事本文レンダリング（{{image:ラベル}} を画像に置換）
+# 分析ノート
+# ─────────────────────────────────────────
+def get_note(axis_key):
+    try:
+        df = run_query("SELECT note_text FROM analysis_notes WHERE axis_key=%s", [axis_key])
+        return df.iloc[0]['note_text'] if not df.empty else ""
+    except Exception:
+        return ""
+
+def save_note(axis_key, text):
+    run_write("""
+        INSERT INTO analysis_notes (axis_key, note_text)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE note_text=%s, updated_at=CURRENT_TIMESTAMP
+    """, [axis_key, text, text])
+
+# ─────────────────────────────────────────
+# 分析画像
+# ─────────────────────────────────────────
+def get_analysis_images(axis_key):
+    try:
+        return run_query(
+            "SELECT image_id, caption, image_data, mime_type FROM analysis_images WHERE axis_key=%s ORDER BY created_at",
+            [axis_key]
+        )
+    except Exception:
+        return pd.DataFrame()
+
+def save_analysis_image(axis_key, caption, image_bytes, mime_type):
+    b64 = base64.b64encode(image_bytes).decode('utf-8')
+    run_write(
+        "INSERT INTO analysis_images (axis_key, caption, image_data, mime_type) VALUES (%s,%s,%s,%s)",
+        [axis_key, caption, b64, mime_type]
+    )
+
+def delete_analysis_image(image_id):
+    run_write("DELETE FROM analysis_images WHERE image_id=%s", [image_id])
+
+# ─────────────────────────────────────────
+# 産駒全体サマリー
+# ─────────────────────────────────────────
+def render_overall_summary():
+    df = run_query("""
+        SELECT
+            COUNT(DISTINCT h.horse_id)                                            AS 登録頭数,
+            COUNT(re.entry_id)                                                    AS 総出走数,
+            COALESCE(SUM(CASE WHEN re.final_rank=1  THEN 1 ELSE 0 END),0)         AS 総勝利数,
+            COALESCE(SUM(CASE WHEN re.final_rank<=3 THEN 1 ELSE 0 END),0)         AS 総複勝数,
+            COUNT(DISTINCT CASE WHEN re.entry_id IS NOT NULL THEN h.horse_id END) AS 出走経験頭数
+        FROM horses h
+        LEFT JOIN raceentries re ON h.horse_id=re.horse_id
+        WHERE h.sire_id=222
+    """)
+    s = df.iloc[0]
+    total_starts = int(s['総出走数'])
+    wins         = int(s['総勝利数'])
+    placed       = int(s['総複勝数'])
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("登録頭数",     f"{int(s['登録頭数'])}頭")
+    c2.metric("出走経験頭数", f"{int(s['出走経験頭数'])}頭")
+    c3.metric("総出走数",     f"{total_starts}回")
+    c4.metric("勝率",         f"{wins/total_starts*100:.1f}%" if total_starts else "―")
+    c5.metric("複勝率",       f"{placed/total_starts*100:.1f}%" if total_starts else "―")
+
+# ─────────────────────────────────────────
+# 産駒分析グラフ＋考察＋画像
+# ─────────────────────────────────────────
+def render_analysis_section(axis_key, top_n=15):
+    axis_map = {
+        '母父別':   ('hf.broodmare_sire_name', '母父'),
+        '生産者別': ('hf.breeder_name',         '生産者'),
+        '騎手別':   ('j.jockey_name',            '騎手'),
+        '馬主別':   ('re.owner',                 '馬主'),
+    }
+    col_expr, col_alias = axis_map[axis_key]
+    sql = f"""
+        SELECT
+            {col_expr}                                                       AS `{col_alias}`,
+            COUNT(DISTINCT h.horse_id)                                       AS 頭数,
+            COUNT(re.entry_id)                                               AS 出走数,
+            COALESCE(SUM(CASE WHEN re.final_rank=1  THEN 1 ELSE 0 END),0)   AS 勝利数,
+            COALESCE(SUM(CASE WHEN re.final_rank<=3 THEN 1 ELSE 0 END),0)   AS 複勝数
+        FROM horses h
+        LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
+        LEFT JOIN raceentries re       ON h.horse_id=re.horse_id
+        LEFT JOIN jockeys  j           ON re.jockey_id=j.jockey_id
+        LEFT JOIN trainers tr          ON re.trainer_id=tr.trainer_id
+        WHERE h.sire_id=222 AND {col_expr} IS NOT NULL
+        GROUP BY {col_expr}
+        HAVING 出走数 > 0
+        ORDER BY 出走数 DESC
+        LIMIT {top_n}
+    """
+    df = run_query(sql)
+    if df.empty:
+        st.info("データがありません。"); return
+
+    df['勝率(%)']  = (df['勝利数'] / df['出走数'] * 100).round(1)
+    df['複勝率(%)'] = (df['複勝数'] / df['出走数'] * 100).round(1)
+    sort_order = df[col_alias].tolist()
+
+    metric = st.radio("表示指標", ["出走数","勝利数","勝率(%)","複勝率(%)"],
+                      horizontal=True, key=f"metric_{axis_key}")
+    chart = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+        x=alt.X(f'{col_alias}:N', sort=sort_order, title=None,
+                axis=alt.Axis(labelAngle=-40, labelOverlap=False)),
+        y=alt.Y(f'{metric}:Q', title=metric),
+        color=alt.Color(f'{metric}:Q', scale=alt.Scale(scheme='blues'), legend=None),
+        tooltip=[col_alias,'頭数','出走数','勝利数','勝率(%)','複勝率(%)']
+    ).properties(height=360)
+    st.altair_chart(chart, use_container_width=True)
+
+    with st.expander("詳細テーブル"):
+        st.dataframe(df[[col_alias,'頭数','出走数','勝利数','複勝数','勝率(%)','複勝率(%)']],
+                     use_container_width=True, hide_index=True)
+
+    note = get_note(axis_key)
+    if note:
+        st.markdown(f"<div class='note-box'><strong>考察</strong><br>{note}</div>",
+                    unsafe_allow_html=True)
+
+    df_imgs = get_analysis_images(axis_key)
+    if not df_imgs.empty:
+        img_cols = st.columns(min(len(df_imgs), 3))
+        for i, (_, img_row) in enumerate(df_imgs.iterrows()):
+            with img_cols[i % 3]:
+                st.image(
+                    f"data:{img_row['mime_type']};base64,{img_row['image_data']}",
+                    caption=img_row['caption'] or "",
+                    use_container_width=True
+                )
+                if st.session_state.is_admin:
+                    if st.button("削除", key=f"del_aimg_{img_row['image_id']}"):
+                        delete_analysis_image(int(img_row['image_id'])); st.rerun()
+
+    if st.session_state.is_admin:
+        with st.expander(f"「{axis_key}」の考察・画像を編集"):
+            st.markdown("**考察テキスト**")
+            new_note = st.text_area("考察を入力（Markdown対応）", value=note,
+                                    height=150, key=f"note_input_{axis_key}")
+            if st.button("考察を保存", key=f"save_note_{axis_key}", type="primary"):
+                save_note(axis_key, new_note)
+                st.success("保存しました！"); st.rerun()
+            st.markdown("---")
+            st.markdown("**画像を追加**")
+            uploaded = st.file_uploader("画像ファイル（JPG / PNG）",
+                                        type=["jpg","jpeg","png"],
+                                        key=f"upload_{axis_key}")
+            img_caption = st.text_input("キャプション（任意）", key=f"caption_{axis_key}")
+            if st.button("画像を追加", key=f"add_img_{axis_key}"):
+                if uploaded:
+                    mime = "image/png" if uploaded.name.endswith(".png") else "image/jpeg"
+                    save_analysis_image(axis_key, img_caption, uploaded.read(), mime)
+                    st.success("画像を追加しました！"); st.rerun()
+                else:
+                    st.warning("画像ファイルを選択してください。")
+
+# ─────────────────────────────────────────
+# 記事本文レンダリング
+# {{image:ラベル}} / {{image:ラベル:サイズ}} / {{graph:軸}} に対応
 # ─────────────────────────────────────────
 def render_article_content(content, images_dict):
-    """
-    本文中の {{image:ラベル}} または {{image:ラベル:サイズ}} を画像に置換しながら描画する。
-    サイズ例: 50%, 300px（省略時は全幅）
-    images_dict: {label: {'data': base64str, 'mime': str, 'caption': str}}
-    """
-    parts = re.split(r'\{\{image:([^}]+)\}\}', content)
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            if part.strip():
-                st.markdown(part, unsafe_allow_html=True)
-        else:
-            tokens = part.strip().split(':', 1)
+    tag_pattern = r'(\{\{(?:image|graph):[^}]+\}\})'
+    parts = re.split(tag_pattern, content)
+    for part in parts:
+        # {{graph:軸}} タグ
+        m_graph = re.match(r'\{\{graph:(.+?)\}\}', part)
+        if m_graph:
+            axis = m_graph.group(1).strip()
+            if axis in ['母父別', '生産者別', '騎手別']:
+                st.markdown(
+                    f"<div style='background:#f0f6ff;border-radius:10px;padding:16px;margin:20px 0'>"
+                    f"<p style='color:#4a90d9;font-size:0.8em;font-weight:600;margin:0 0 8px'>{axis}</p>",
+                    unsafe_allow_html=True
+                )
+                render_analysis_section(axis, top_n=10)
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.warning(f"不明なグラフ軸: '{axis}'")
+            continue
+
+        # {{image:ラベル}} / {{image:ラベル:サイズ}} タグ
+        m_image = re.match(r'\{\{image:([^}]+)\}\}', part)
+        if m_image:
+            tokens = m_image.group(1).strip().split(':', 1)
             label = tokens[0]
             size  = tokens[1] if len(tokens) > 1 else None
-
             if label in images_dict:
                 img = images_dict[label]
                 if size:
@@ -102,23 +284,21 @@ def render_article_content(content, images_dict):
                     img_bytes = base64.b64decode(img['data'])
                     st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
             else:
-                st.warning(f" 画像 '{{{{image:{label}}}}}' が見つかりません")
+                st.warning(f"画像 '{{{{image:{label}}}}}' が見つかりません")
+            continue
+
+        # 通常テキスト
+        if part.strip():
+            st.markdown(part, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# session_state 初期化（ページ管理）
+# session_state 初期化
 # ─────────────────────────────────────────
-if 'page' not in st.session_state:
-    st.session_state.page = 'list'
-if 'selected_horse_id' not in st.session_state:
-    st.session_state.selected_horse_id = None
-if 'selected_horse_name' not in st.session_state:
-    st.session_state.selected_horse_name = ""
-if 'selected_article_id' not in st.session_state:
-    st.session_state.selected_article_id = None
-if 'edit_article_id' not in st.session_state:
-    st.session_state.edit_article_id = None
-if 'is_admin' not in st.session_state:
-    st.session_state.is_admin = False
+for k, v in [('page','list'), ('selected_horse_id',None),
+             ('selected_horse_name',""), ('selected_article_id',None),
+             ('edit_article_id',None), ('is_admin',False)]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 def go_detail(horse_id, horse_name):
     st.session_state.selected_horse_id   = horse_id
@@ -141,21 +321,14 @@ def go_list_article_tab():
 # ══════════════════════════════════════════
 if st.session_state.page == 'article':
     article_id = st.session_state.selected_article_id
-
     st.button("← コラム一覧に戻る", on_click=go_list_article_tab)
     st.markdown("---")
-
-    sql_article = """
-        SELECT
-            article_id,
-            title,
-            content,
-            DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') AS post_date
-        FROM articles
-        WHERE article_id = %s
-    """
     try:
-        df_article = run_query(sql_article, [article_id])
+        df_article = run_query("""
+            SELECT article_id, title, content,
+                   DATE_FORMAT(created_at,'%Y年%m月%d日 %H:%i') AS post_date
+            FROM articles WHERE article_id=%s
+        """, [article_id])
         if df_article.empty:
             st.warning("記事が見つかりませんでした。")
         else:
@@ -163,12 +336,10 @@ if st.session_state.page == 'article':
             aid = int(row['article_id'])
 
             # この記事の画像を取得
-            sql_imgs = """
-                SELECT label, caption, image_data, mime_type
-                FROM article_images
-                WHERE article_id = %s
-            """
-            df_imgs = run_query(sql_imgs, [aid])
+            df_imgs = run_query(
+                "SELECT label, caption, image_data, mime_type FROM article_images WHERE article_id=%s",
+                [aid]
+            )
             images_dict = {
                 r['label']: {'data': r['image_data'], 'mime': r['mime_type'], 'caption': r['caption']}
                 for _, r in df_imgs.iterrows()
@@ -176,113 +347,68 @@ if st.session_state.page == 'article':
 
             # 編集モード
             if st.session_state.is_admin and st.session_state.edit_article_id == aid:
-                st.markdown(f"**「{row['title']}」を編集中...**")
+                st.markdown(f"**「{row['title']}」を編集中**")
                 with st.form(key=f"edit_form_{aid}"):
-                    edit_title   = st.text_input("タイトル", value=row['title'])
-                    edit_content = st.text_area("本文", value=row['content'], height=300)
-                    col_submit, col_cancel = st.columns([1, 1])
-                    if col_submit.form_submit_button("更新する"):
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE articles SET title = %s, content = %s WHERE article_id = %s",
-                            (edit_title, edit_content, aid)
-                        )
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        st.session_state.edit_article_id = None
-                        st.rerun()
-                    if col_cancel.form_submit_button("キャンセル"):
-                        st.session_state.edit_article_id = None
-                        st.rerun()
-
-            # 通常表示
+                    et = st.text_input("タイトル", value=row['title'])
+                    ec = st.text_area("本文", value=row['content'], height=400)
+                    c1, c2 = st.columns([1, 1])
+                    if c1.form_submit_button("更新する", type="primary"):
+                        run_write("UPDATE articles SET title=%s,content=%s WHERE article_id=%s", [et, ec, aid])
+                        st.session_state.edit_article_id = None; st.rerun()
+                    if c2.form_submit_button("キャンセル"):
+                        st.session_state.edit_article_id = None; st.rerun()
             else:
                 st.title(row['title'])
                 st.caption(f"公開日時: {row['post_date']}")
                 st.markdown("---")
 
-                # {{image:ラベル}} を画像に置換しながら本文を描画
                 render_article_content(row['content'], images_dict)
 
-                # 管理者ボタン（編集・削除）
                 if st.session_state.is_admin:
                     st.markdown("---")
-                    col1, col2, _ = st.columns([1, 1, 8])
-                    if col1.button("編集"):
-                        st.session_state.edit_article_id = aid
-                        st.rerun()
-                    if col2.button("削除"):
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM article_images WHERE article_id = %s", (aid,))
-                        cursor.execute("DELETE FROM articles WHERE article_id = %s", (aid,))
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        go_list_article_tab()
-                        st.rerun()
+                    c1, c2, _ = st.columns([1, 1, 8])
+                    if c1.button("編集"):
+                        st.session_state.edit_article_id = aid; st.rerun()
+                    if c2.button("削除"):
+                        run_write("DELETE FROM article_images WHERE article_id=%s", [aid])
+                        run_write("DELETE FROM articles WHERE article_id=%s", [aid])
+                        go_list_article_tab(); st.rerun()
 
-                    # ── 画像管理 ──────────────────────────────
+                    # 画像管理
                     st.markdown("---")
                     st.subheader("画像管理")
                     st.caption("本文中に `{{image:ラベル}}` で全幅表示、`{{image:ラベル:50%}}` のようにサイズ指定も可能です。")
 
-                    # 登録済み画像の一覧
-                    sql_imgs_admin = """
-                        SELECT image_id, label, caption
-                        FROM article_images
-                        WHERE article_id = %s
-                        ORDER BY image_id
-                    """
-                    df_imgs_admin = run_query(sql_imgs_admin, [aid])
+                    df_imgs_admin = run_query(
+                        "SELECT image_id, label, caption FROM article_images WHERE article_id=%s ORDER BY image_id",
+                        [aid]
+                    )
                     if not df_imgs_admin.empty:
                         st.markdown("**登録済み画像**")
                         for _, img_row in df_imgs_admin.iterrows():
                             col_lbl, col_del = st.columns([9, 1])
                             cap = img_row['caption'] or '（キャプションなし）'
                             col_lbl.markdown(f"`{{{{image:{img_row['label']}}}}}` — {cap}")
-                            if col_del.button("🗑️", key=f"del_img_{img_row['image_id']}"):
-                                conn = get_connection()
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    "DELETE FROM article_images WHERE image_id = %s",
-                                    (img_row['image_id'],)
-                                )
-                                conn.commit()
-                                cursor.close()
-                                conn.close()
+                            if col_del.button("削除", key=f"del_img_{img_row['image_id']}"):
+                                run_write("DELETE FROM article_images WHERE image_id=%s",
+                                          [int(img_row['image_id'])])
                                 st.rerun()
 
-                    # 画像アップロード
                     with st.expander("＋ 画像をアップロード"):
-                        label_input   = st.text_input(
-                            "ラベル（半角英数字推奨）",
-                            key=f"img_label_{aid}",
-                            help="例: fig1　→ 本文中に {{image:fig1}} と記述"
-                        )
+                        label_input   = st.text_input("ラベル（半角英数字推奨）", key=f"img_label_{aid}",
+                                                       help="例: fig1 → 本文中に {{image:fig1}} と記述")
                         caption_input = st.text_input("キャプション（任意）", key=f"img_caption_{aid}")
-                        uploaded      = st.file_uploader(
-                            "画像ファイル",
-                            type=["png", "jpg", "jpeg", "gif", "webp"],
-                            key=f"img_upload_{aid}"
-                        )
+                        uploaded      = st.file_uploader("画像ファイル",
+                                                          type=["png","jpg","jpeg","gif","webp"],
+                                                          key=f"img_upload_{aid}")
                         if st.button("アップロード", key=f"img_upload_btn_{aid}"):
                             if uploaded and label_input:
-                                img_bytes = uploaded.read()
-                                img_b64   = base64.b64encode(img_bytes).decode('utf-8')
-                                mime_type = uploaded.type
-                                conn = get_connection()
-                                cursor = conn.cursor()
-                                cursor.execute(
+                                img_b64 = base64.b64encode(uploaded.read()).decode('utf-8')
+                                run_write(
                                     "INSERT INTO article_images (article_id, label, caption, image_data, mime_type) "
-                                    "VALUES (%s, %s, %s, %s, %s)",
-                                    (aid, label_input, caption_input or None, img_b64, mime_type)
+                                    "VALUES (%s,%s,%s,%s,%s)",
+                                    [aid, label_input, caption_input or None, img_b64, uploaded.type]
                                 )
-                                conn.commit()
-                                cursor.close()
-                                conn.close()
                                 st.success(f"アップロード完了。本文中に `{{{{image:{label_input}}}}}` と記述すると表示されます。")
                                 st.rerun()
                             else:
@@ -302,50 +428,51 @@ elif st.session_state.page == 'detail':
     st.title(f"{horse_name}")
     st.markdown("---")
 
-    # ── 写真 ＋ 基本情報 ＋ 血統 ─────────────────────
-    sql_profile = """
-        SELECT
-            hf.date_of_birth       AS 生年月日,
-            hf.gender              AS 性別,
-            hf.color               AS 毛色,
-            hf.bloodline           AS 血統,
-            h.Owner                AS 馬主,
-            hf.breeder_name        AS 生産者,
-            hf.sire_name           AS 父,
-            hf.dam_name            AS 母,
-            hf.broodmare_sire_name AS 母父,
-            hf.trainer_name        AS 調教師
-        FROM horses_formatted hf
-        JOIN horses h ON hf.horse_id = h.horse_id
-        WHERE hf.horse_id = %s
-    """
+    # 写真 ＋ 基本情報 ＋ 血統
     try:
-        df_profile = run_query(sql_profile, [horse_id])
+        df_profile = run_query("""
+            SELECT hf.date_of_birth AS 生年月日, hf.gender AS 性別, hf.color AS 毛色,
+                   hf.bloodline AS 血統,
+                   COALESCE(
+                       (SELECT re2.owner FROM raceentries re2
+                        JOIN races r2 ON re2.race_id = r2.race_id
+                        WHERE re2.horse_id = hf.horse_id
+                        ORDER BY r2.race_date DESC LIMIT 1),
+                       h.Owner
+                   ) AS 馬主,
+                   hf.breeder_name AS 生産者,
+                   hf.sire_name AS 父, hf.dam_name AS 母,
+                   hf.broodmare_sire_name AS 母父, hf.trainer_name AS 調教師,
+                   tr.region AS region_raw
+            FROM horses_formatted hf
+            JOIN horses h ON hf.horse_id=h.horse_id
+            LEFT JOIN trainers tr ON h.trainer_id = tr.trainer_id
+            WHERE hf.horse_id=%s
+        """, [horse_id])
         if not df_profile.empty:
             p = df_profile.iloc[0]
 
-            # 写真を取得
-            sql_horse_img = "SELECT image_data, mime_type FROM horse_images WHERE horse_id = %s"
-            df_horse_img  = run_query(sql_horse_img, [horse_id])
+            region = p['region_raw']
+            if region in ['美浦', '栗東']:
+                shozoku = region
+            elif region:
+                shozoku = f"地方（{region}）"
+            else:
+                shozoku = '―'
 
+            df_horse_img = run_query(
+                "SELECT image_data, mime_type FROM horse_images WHERE horse_id=%s", [horse_id]
+            )
             col_photo, col_info, col_blood = st.columns([2, 3, 3])
 
-            # 写真欄
             with col_photo:
                 st.subheader("写真")
                 if not df_horse_img.empty:
-                    img_row   = df_horse_img.iloc[0]
-                    img_bytes = base64.b64decode(img_row['image_data'])
+                    img_bytes = base64.b64decode(df_horse_img.iloc[0]['image_data'])
                     st.image(img_bytes, use_container_width=True)
-                    # 管理者：写真削除
                     if st.session_state.is_admin:
                         if st.button("写真を削除", key="del_horse_img"):
-                            conn = get_connection()
-                            cursor = conn.cursor()
-                            cursor.execute("DELETE FROM horse_images WHERE horse_id = %s", (horse_id,))
-                            conn.commit()
-                            cursor.close()
-                            conn.close()
+                            run_write("DELETE FROM horse_images WHERE horse_id=%s", [horse_id])
                             st.rerun()
                 else:
                     st.markdown(
@@ -355,26 +482,16 @@ elif st.session_state.page == 'detail':
                         "No Image</div>",
                         unsafe_allow_html=True
                     )
-                    # 管理者：写真アップロード
                     if st.session_state.is_admin:
-                        uploaded_horse = st.file_uploader(
-                            "写真をアップロード",
-                            type=["png", "jpg", "jpeg", "webp"],
-                            key="horse_img_upload"
-                        )
+                        uploaded_horse = st.file_uploader("写真をアップロード",
+                                                           type=["png","jpg","jpeg","webp"],
+                                                           key="horse_img_upload")
                         if uploaded_horse:
-                            img_b64  = base64.b64encode(uploaded_horse.read()).decode('utf-8')
-                            mime     = uploaded_horse.type
-                            conn     = get_connection()
-                            cursor   = conn.cursor()
-                            cursor.execute(
-                                "INSERT INTO horse_images (horse_id, image_data, mime_type) "
-                                "VALUES (%s, %s, %s)",
-                                (horse_id, img_b64, mime)
+                            img_b64 = base64.b64encode(uploaded_horse.read()).decode('utf-8')
+                            run_write(
+                                "INSERT INTO horse_images (horse_id, image_data, mime_type) VALUES (%s,%s,%s)",
+                                [horse_id, img_b64, uploaded_horse.type]
                             )
-                            conn.commit()
-                            cursor.close()
-                            conn.close()
                             st.rerun()
 
             with col_info:
@@ -387,8 +504,10 @@ elif st.session_state.page == 'detail':
 <tr><td style="padding:4px 8px; color:#888;">馬主</td><td style="padding:4px 8px;">{p['馬主'] or '―'}</td></tr>
 <tr><td style="padding:4px 8px; color:#888;">生産者</td><td style="padding:4px 8px;">{p['生産者'] or '―'}</td></tr>
 <tr><td style="padding:4px 8px; color:#888;">調教師</td><td style="padding:4px 8px;">{p['調教師'] or '―'}</td></tr>
+<tr><td style="padding:4px 8px; color:#888;">所属</td><td style="padding:4px 8px;">{shozoku}</td></tr>
 </table>
 """, unsafe_allow_html=True)
+
             with col_blood:
                 st.subheader("血統")
                 st.markdown(f"""
@@ -402,76 +521,49 @@ elif st.session_state.page == 'detail':
         st.error(f"基本情報の取得に失敗しました: {e}")
 
     st.markdown("---")
-
     st.subheader("通算成績")
-    sql_summary = """
-        SELECT
-            COUNT(*)                                                          AS 出走数,
-            COALESCE(SUM(CASE WHEN re.final_rank = 1  THEN 1 ELSE 0 END), 0) AS 一着,
-            COALESCE(SUM(CASE WHEN re.final_rank = 2  THEN 1 ELSE 0 END), 0) AS 二着,
-            COALESCE(SUM(CASE WHEN re.final_rank = 3  THEN 1 ELSE 0 END), 0) AS 三着,
-            COALESCE(SUM(CASE WHEN re.final_rank >= 4 THEN 1 ELSE 0 END), 0) AS 四着以下
-        FROM raceentries re
-        WHERE re.horse_id = %s
-    """
     try:
-        df_sum = run_query(sql_summary, [horse_id])
-        if not df_sum.empty:
-            s     = df_sum.iloc[0]
-            total = int(s['出走数'])
-            w1    = int(s['一着'])
-            w2    = int(s['二着'])
-            w3    = int(s['三着'])
-            w4    = int(s['四着以下'])
-            if total == 0:
-                st.markdown("### 0戦0勝　<span style='font-size:1.2em; color:#555;'>(未出走)</span>", unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    f"### {total}戦{w1}勝　"
-                    f"<span style='font-size:1.2em; color:#555;'>({w1}-{w2}-{w3}-{w4})</span>",
-                    unsafe_allow_html=True
-                )
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("勝率",    f"{w1/total*100:.1f}%")
-                m2.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
-                m3.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
-                m4.metric("3着内数", f"{w1+w2+w3}回")
+        df_sum = run_query("""
+            SELECT COUNT(*) AS 出走数,
+                   COALESCE(SUM(CASE WHEN final_rank=1  THEN 1 ELSE 0 END),0) AS 一着,
+                   COALESCE(SUM(CASE WHEN final_rank=2  THEN 1 ELSE 0 END),0) AS 二着,
+                   COALESCE(SUM(CASE WHEN final_rank=3  THEN 1 ELSE 0 END),0) AS 三着,
+                   COALESCE(SUM(CASE WHEN final_rank>=4 THEN 1 ELSE 0 END),0) AS 四着以下
+            FROM raceentries WHERE horse_id=%s
+        """, [horse_id])
+        s = df_sum.iloc[0]
+        total,w1,w2,w3,w4 = int(s['出走数']),int(s['一着']),int(s['二着']),int(s['三着']),int(s['四着以下'])
+        if total == 0:
+            st.markdown("### 0戦0勝　<span style='color:#888'>(未出走)</span>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"### {total}戦{w1}勝　<span style='color:#555'>({w1}-{w2}-{w3}-{w4})</span>",
+                        unsafe_allow_html=True)
+            m1,m2,m3,m4 = st.columns(4)
+            m1.metric("勝率",   f"{w1/total*100:.1f}%")
+            m2.metric("連対率", f"{(w1+w2)/total*100:.1f}%")
+            m3.metric("複勝率", f"{(w1+w2+w3)/total*100:.1f}%")
+            m4.metric("3着内数",f"{w1+w2+w3}回")
     except Exception as e:
         st.error(f"通算成績の取得に失敗しました: {e}")
 
     st.markdown("---")
-
     st.subheader("出走履歴")
-    sql_entries = """
-        SELECT
-            r.race_date        AS 開催日,
-            r.race_name        AS レース名,
-            t.track_name       AS 競馬場,
-            r.distance_meters  AS 距離_m,
-            r.surface_type     AS 馬場種別,
-            r.track_condition  AS 馬場状態,
-            r.race_class       AS クラス,
-            re.final_rank      AS 着順,
-            re.time_seconds    AS タイム_秒,
-            re.running_style   AS 脚質,
-            re.race_pace       AS ペース,
-            re.Weight          AS 斤量,
-            j.jockey_name      AS 騎手,
-            tr.trainer_name    AS 調教師
-        FROM raceentries re
-        JOIN races   r  ON re.race_id    = r.race_id
-        JOIN tracks  t  ON r.track_id    = t.track_id
-        LEFT JOIN jockeys  j  ON re.jockey_id  = j.jockey_id
-        LEFT JOIN trainers tr ON re.trainer_id = tr.trainer_id
-        WHERE re.horse_id = %s
-        ORDER BY r.race_date DESC
-    """
     try:
-        df_entries = run_query(sql_entries, [horse_id])
-        if df_entries.empty:
-            st.info("出走履歴がありません。")
-        else:
-            st.dataframe(df_entries, use_container_width=True, hide_index=True)
+        df_entries = run_query("""
+            SELECT r.race_date AS 開催日, r.race_name AS レース名, t.track_name AS 競馬場,
+                   r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
+                   r.track_condition AS 馬場状態, r.race_class AS クラス,
+                   re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                   re.running_style AS 脚質, re.race_pace AS ペース,
+                   re.Weight AS 斤量, j.jockey_name AS 騎手, tr.trainer_name AS 調教師
+            FROM raceentries re
+            JOIN races r ON re.race_id=r.race_id JOIN tracks t ON r.track_id=t.track_id
+            LEFT JOIN jockeys j ON re.jockey_id=j.jockey_id
+            LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
+            WHERE re.horse_id=%s ORDER BY r.race_date DESC
+        """, [horse_id])
+        if df_entries.empty: st.info("出走履歴がありません。")
+        else: st.dataframe(df_entries, use_container_width=True, hide_index=True)
     except Exception as e:
         st.error(f"出走履歴の取得に失敗しました: {e}")
 
@@ -481,260 +573,220 @@ elif st.session_state.page == 'detail':
 else:
     st.title("エフフォーリア産駒データベース")
 
-    # ── サイドバー ──────────────────────────────────
+    # サイドバー
     st.sidebar.markdown("---")
     total_views = update_and_get_views()
     st.sidebar.caption(f"あなたは: {total_views} 人目の武史です。")
-
     st.sidebar.header("検索条件")
     horse_name_input = st.sidebar.text_input("馬名（一部でも可）", value="")
-    selected_gender  = st.sidebar.radio("性別", ["すべて", "牡", "牝", "騸"])
+    selected_gender  = st.sidebar.radio("性別", ["すべて","牡","牝","騸"])
     st.sidebar.markdown("**産年（生年）**")
-    year_col1, year_col2 = st.sidebar.columns(2)
-    birth_year_from = year_col1.number_input("From", min_value=2000, max_value=2040, value=2022, step=1)
-    birth_year_to   = year_col2.number_input("To",   min_value=2000, max_value=2040, value=2024, step=1)
+    yc1,yc2 = st.sidebar.columns(2)
+    birth_year_from = yc1.number_input("From", min_value=2000, max_value=2040, value=2022, step=1)
+    birth_year_to   = yc2.number_input("To",   min_value=2000, max_value=2040, value=2024, step=1)
     st.sidebar.markdown("---")
     st.sidebar.caption("※ 馬名は部分一致で検索します")
 
-    # ── 管理者メニュー ──────────────────────────────
+    # 管理者メニュー
     st.sidebar.markdown("---")
-    with st.sidebar.expander(" 管理者メニュー"):
+    with st.sidebar.expander("管理者メニュー"):
         if not st.session_state.is_admin:
-            admin_password  = st.text_input("管理者パスワード", type="password", key="admin_pass")
-            SECRET_PASSWORD = st.secrets["ADMIN_PASSWORD"]
-            if admin_password == SECRET_PASSWORD:
-                st.session_state.is_admin = True
-                st.rerun()
-            elif admin_password != "":
+            ap = st.text_input("管理者パスワード", type="password", key="admin_pass")
+            if ap == st.secrets["ADMIN_PASSWORD"]:
+                st.session_state.is_admin = True; st.rerun()
+            elif ap != "":
                 st.error("パスワードが間違っています。")
         else:
             st.success("管理者としてログイン中")
             if st.button("ログアウト", key="logout_btn"):
-                st.session_state.is_admin = False
-                st.rerun()
+                st.session_state.is_admin = False; st.rerun()
             st.markdown("---")
             st.markdown("**新規記事の投稿**")
+            st.caption("`{{image:ラベル}}` で画像挿入 / `{{graph:母父別}}` などでグラフ挿入")
             with st.form(key='post_article_form', clear_on_submit=True):
-                article_title   = st.text_input("記事のタイトル")
-                article_content = st.text_area("本文（Markdown対応）", height=200)
+                at = st.text_input("記事のタイトル")
+                ac = st.text_area("本文（Markdown対応）", height=200)
                 if st.form_submit_button("記事を公開する"):
-                    if article_title and article_content:
+                    if at and ac:
                         try:
-                            conn = get_connection()
-                            cursor = conn.cursor()
-                            cursor.execute(
-                                "INSERT INTO articles (title, content) VALUES (%s, %s)",
-                                (article_title, article_content)
-                            )
-                            conn.commit()
-                            cursor.close()
-                            conn.close()
-                            st.success("記事を公開しました！")
-                            st.rerun()
+                            run_write("INSERT INTO articles (title,content) VALUES (%s,%s)", [at, ac])
+                            st.success("記事を公開しました！"); st.rerun()
                         except Exception as e:
                             st.error(f"投稿に失敗しました: {e}")
                     else:
                         st.warning("タイトルと本文を入力してください。")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["産駒一覧", "レース成績検索", "カスタム分析", "条件検索", "記事・コラム"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "記事・コラム"
+    ])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
     with tab1:
         st.subheader("産駒一覧")
         st.caption("馬名をクリックすると詳細ページに移動します")
-
-        sort_col1, sort_col2 = st.columns([2, 1])
-        sort_key   = sort_col1.selectbox("並び替え", ["生年月日", "馬名"], key="sort_key")
-        sort_order = sort_col2.selectbox("順序", ["昇順 ↑", "降順 ↓"], key="sort_order")
+        sc1,sc2 = st.columns([2,1])
+        sort_key   = sc1.selectbox("並び替え", ["生年月日","馬名"], key="sort_key")
+        sort_order = sc2.selectbox("順序", ["昇順 ↑","降順 ↓"], key="sort_order")
         sort_asc   = sort_order == "昇順 ↑"
 
         sql = """
-            SELECT
-                h.horse_id,
-                h.horse_name          AS 馬名,
-                h.date_of_birth       AS 生年月日,
-                YEAR(h.date_of_birth) AS 産年,
-                h.gender              AS 性別,
-                h.color               AS 毛色,
-                hf.dam_name           AS 母名,
-                hf.breeder_name       AS 生産牧場,
-                COUNT(re.entry_id)    AS 出走数,
-                COALESCE(SUM(CASE WHEN re.final_rank = 1 THEN 1 ELSE 0 END), 0) AS 勝利数
+            SELECT h.horse_id, h.horse_name AS 馬名, h.date_of_birth AS 生年月日,
+                   YEAR(h.date_of_birth) AS 産年, h.gender AS 性別, h.color AS 毛色,
+                   hf.dam_name AS 母名, hf.breeder_name AS 生産牧場,
+                   COUNT(re.entry_id) AS 出走数,
+                   COALESCE(SUM(CASE WHEN re.final_rank=1 THEN 1 ELSE 0 END),0) AS 勝利数
             FROM horses h
-            LEFT JOIN horses_formatted hf ON h.horse_id = hf.horse_id
-            LEFT JOIN raceentries re ON h.horse_id = re.horse_id
-            WHERE h.sire_id = 222
+            LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
+            LEFT JOIN raceentries re ON h.horse_id=re.horse_id
+            WHERE h.sire_id=222
         """
         params = []
         if horse_name_input:
-            sql += " AND h.horse_name LIKE %s"
-            params.append(f"%{horse_name_input}%")
+            sql += " AND h.horse_name LIKE %s"; params.append(f"%{horse_name_input}%")
         if selected_gender != "すべて":
-            sql += " AND h.gender = %s"
-            params.append(selected_gender)
+            sql += " AND h.gender=%s"; params.append(selected_gender)
         sql += " AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
         params.extend([birth_year_from, birth_year_to])
-        sql += " GROUP BY h.horse_id, h.horse_name, h.date_of_birth, h.gender, h.color, hf.dam_name, hf.breeder_name"
+        sql += " GROUP BY h.horse_id,h.horse_name,h.date_of_birth,h.gender,h.color,hf.dam_name,hf.breeder_name"
 
         try:
             df_horses = run_query(sql, params)
-            df_horses['戦績'] = df_horses['出走数'].astype(int).astype(str) + '戦' + df_horses['勝利数'].astype(int).astype(str) + '勝'
+            df_horses['戦績'] = (df_horses['出走数'].astype(int).astype(str) + '戦' +
+                                 df_horses['勝利数'].astype(int).astype(str) + '勝')
             df_horses = df_horses.sort_values(by=sort_key, ascending=sort_asc)
-
             st.write(f"検索結果: **{len(df_horses)}** 頭")
 
             if not df_horses.empty:
-                h0, h1, h2, h3, h4, h5 = st.columns([3, 2, 1, 1, 2, 1])
-                h0.markdown("**馬名**")
-                h1.markdown("**生年月日**")
-                h2.markdown("**性別**")
-                h3.markdown("**毛色**")
-                h4.markdown("**母名**")
-                h5.markdown("**戦績**")
+                h0,h1,h2,h3,h4,h5 = st.columns([3,2,1,1,2,1])
+                h0.markdown("**馬名**"); h1.markdown("**生年月日**"); h2.markdown("**性別**")
+                h3.markdown("**毛色**"); h4.markdown("**母名**"); h5.markdown("**戦績**")
                 st.markdown("---")
 
                 for _, row in df_horses.iterrows():
-                    c0, c1, c2, c3, c4, c5 = st.columns([3, 2, 1, 1, 2, 1])
-                    c0.button(
-                        row['馬名'],
-                        key=f"btn_{row['horse_id']}",
-                        on_click=go_detail,
-                        args=(row['horse_id'], row['馬名'])
-                    )
-                    c1.write(str(row['生年月日']))
-                    c2.write(row['性別'])
-                    c3.write(row['毛色'] or '―')
-                    c4.write(row['母名'] or '―')
-                    c5.write(row['戦績'])
+                    c0,c1,c2,c3,c4,c5 = st.columns([3,2,1,1,2,1])
+                    c0.button(row['馬名'], key=f"btn_{row['horse_id']}",
+                              on_click=go_detail, args=(row['horse_id'], row['馬名']))
+                    c1.write(str(row['生年月日'])); c2.write(row['性別'])
+                    c3.write(row['毛色'] or '―'); c4.write(row['母名'] or '―'); c5.write(row['戦績'])
 
                 st.markdown("---")
-                col1, col2 = st.columns(2)
-                with col1:
+                gc1,gc2 = st.columns(2)
+                with gc1:
                     st.subheader("毛色の内訳")
-                    import altair as alt
-                    color_counts   = df_horses['毛色'].fillna('不明').value_counts()
-                    df_color       = color_counts.reset_index()
-                    df_color.columns = ['毛色', '頭数']
-                    chart_color = alt.Chart(df_color).mark_bar().encode(
-                        x=alt.X('毛色:N', sort=df_color['毛色'].tolist(), title=None,
-                                axis=alt.Axis(labelAngle=-45, labelOverlap=False)),
-                        y=alt.Y('頭数:Q', title='頭数'),
-                        tooltip=['毛色', '頭数']
-                    ).properties(height=400)
-                    st.altair_chart(chart_color, use_container_width=True)
-
-                with col2:
+                    cc2 = df_horses['毛色'].fillna('不明').value_counts().reset_index()
+                    cc2.columns = ['毛色','頭数']
+                    st.altair_chart(
+                        alt.Chart(cc2).mark_bar(cornerRadiusTopLeft=3,cornerRadiusTopRight=3).encode(
+                            x=alt.X('毛色:N', sort=cc2['毛色'].tolist(), title=None,
+                                    axis=alt.Axis(labelAngle=-45)),
+                            y=alt.Y('頭数:Q'), tooltip=['毛色','頭数']
+                        ).properties(height=350), use_container_width=True
+                    )
+                with gc2:
                     st.subheader("生産地別 頭数")
-                    import altair as alt
-                    sql_location = """
-                        SELECT b.location AS 生産地
-                        FROM horses h
-                        LEFT JOIN breeders b ON h.breeder_id = b.breeder_id
-                        WHERE h.sire_id = 222
-                    """
-                    loc_params = []
-                    if horse_name_input:
-                        sql_location += " AND h.horse_name LIKE %s"
-                        loc_params.append(f"%{horse_name_input}%")
-                    if selected_gender != "すべて":
-                        sql_location += " AND h.gender = %s"
-                        loc_params.append(selected_gender)
-                    sql_location += " AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
-                    loc_params.extend([birth_year_from, birth_year_to])
-
-                    df_loc     = run_query(sql_location, loc_params)
-                    loc_counts = df_loc['生産地'].fillna('不明').value_counts()
-                    top9_loc   = loc_counts.head(9)
-                    others_loc = loc_counts.iloc[9:].sum()
-                    df_chart   = top9_loc.reset_index()
-                    df_chart.columns = ['生産地', '頭数']
-                    df_chart   = pd.concat(
-                        [df_chart, pd.DataFrame([{'生産地': 'その他', '頭数': others_loc}])],
+                    sloc = ("SELECT b.location AS 生産地 FROM horses h "
+                            "LEFT JOIN breeders b ON h.breeder_id=b.breeder_id WHERE h.sire_id=222")
+                    lp = []
+                    if horse_name_input: sloc+=" AND h.horse_name LIKE %s"; lp.append(f"%{horse_name_input}%")
+                    if selected_gender!="すべて": sloc+=" AND h.gender=%s"; lp.append(selected_gender)
+                    sloc+=" AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
+                    lp.extend([birth_year_from, birth_year_to])
+                    dfl = run_query(sloc, lp)
+                    lc  = dfl['生産地'].fillna('不明').value_counts()
+                    top9 = lc.head(9).reset_index(); top9.columns = ['生産地','頭数']
+                    dflc = pd.concat(
+                        [top9, pd.DataFrame([{'生産地':'その他','頭数':lc.iloc[9:].sum()}])],
                         ignore_index=True
                     )
-                    chart_loc = alt.Chart(df_chart).mark_bar().encode(
-                        x=alt.X('生産地:N', sort=df_chart['生産地'].tolist(), title=None,
-                                axis=alt.Axis(labelAngle=-45, labelOverlap=False)),
-                        y=alt.Y('頭数:Q', title='頭数'),
-                        tooltip=['生産地', '頭数']
-                    ).properties(height=400)
-                    st.altair_chart(chart_loc, use_container_width=True)
-
+                    st.altair_chart(
+                        alt.Chart(dflc).mark_bar(cornerRadiusTopLeft=3,cornerRadiusTopRight=3).encode(
+                            x=alt.X('生産地:N', sort=dflc['生産地'].tolist(), title=None,
+                                    axis=alt.Axis(labelAngle=-45)),
+                            y=alt.Y('頭数:Q'), tooltip=['生産地','頭数']
+                        ).properties(height=350), use_container_width=True
+                    )
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
 
-    # ── TAB 2: レース成績検索 ───────────────────────
+    # ── TAB 2: レース成績検索 ──────────────────────
     with tab2:
         st.subheader("馬名でレース成績を検索")
-        search_name = st.text_input("馬名を入力（部分一致）", value=horse_name_input, key="tab2_name")
-
+        sn = st.text_input("馬名を入力（部分一致）", value=horse_name_input, key="tab2_name")
         if st.button("成績を検索", type="primary"):
-            if not search_name:
+            if not sn:
                 st.warning("馬名を入力してください")
             else:
-                sql_results = """
-                    SELECT
-                        h.horse_name       AS 馬名,
-                        r.race_date        AS 開催日,
-                        r.race_name        AS レース名,
-                        t.track_name       AS 競馬場,
-                        t.course_direction AS コース方向,
-                        r.distance_meters  AS 距離_m,
-                        r.surface_type     AS 馬場種別,
-                        r.track_condition  AS 馬場状態,
-                        r.race_class       AS クラス,
-                        re.final_rank      AS 着順,
-                        re.time_seconds    AS タイム_秒,
-                        re.running_style   AS 脚質,
-                        re.race_pace       AS レースペース,
-                        re.Weight          AS 斤量,
-                        re.harness         AS 馬具,
-                        j.jockey_name      AS 騎手,
-                        tr.trainer_name    AS 調教師,
-                        tr.region          AS 調教師所属
-                    FROM raceentries re
-                    JOIN horses  h  ON re.horse_id   = h.horse_id
-                    JOIN races   r  ON re.race_id    = r.race_id
-                    JOIN tracks  t  ON r.track_id    = t.track_id
-                    LEFT JOIN jockeys  j  ON re.jockey_id  = j.jockey_id
-                    LEFT JOIN trainers tr ON re.trainer_id = tr.trainer_id
-                    WHERE h.sire_id = 222
-                      AND h.horse_name LIKE %s
-                    ORDER BY r.race_date DESC
-                """
                 try:
-                    df_results = run_query(sql_results, [f"%{search_name}%"])
-                    if df_results.empty:
+                    dfr = run_query("""
+                        SELECT h.horse_name AS 馬名, r.race_date AS 開催日, r.race_name AS レース名,
+                               t.track_name AS 競馬場, t.course_direction AS コース方向,
+                               r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
+                               r.track_condition AS 馬場状態, r.race_class AS クラス,
+                               re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                               re.running_style AS 脚質, re.race_pace AS レースペース,
+                               re.Weight AS 斤量, re.harness AS 馬具,
+                               j.jockey_name AS 騎手, tr.trainer_name AS 調教師, tr.region AS 調教師所属
+                        FROM raceentries re
+                        JOIN horses h ON re.horse_id=h.horse_id
+                        JOIN races r ON re.race_id=r.race_id
+                        JOIN tracks t ON r.track_id=t.track_id
+                        LEFT JOIN jockeys j ON re.jockey_id=j.jockey_id
+                        LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
+                        WHERE h.sire_id=222 AND h.horse_name LIKE %s ORDER BY r.race_date DESC
+                    """, [f"%{sn}%"])
+                    if dfr.empty:
                         st.info("該当する成績が見つかりませんでした。")
                     else:
-                        rank_series = pd.to_numeric(df_results['着順'], errors='coerce')
-                        total = len(df_results)
-                        w1 = int((rank_series == 1).sum())
-                        w2 = int((rank_series == 2).sum())
-                        w3 = int((rank_series == 3).sum())
-                        w4 = int((rank_series >= 4).sum())
-                        st.markdown(
-                            f"### {total}戦{w1}勝　"
-                            f"<span style='font-size:1.1em; color:#555;'>({w1}-{w2}-{w3}-{w4})</span>",
-                            unsafe_allow_html=True
-                        )
-                        m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("勝率",    f"{w1/total*100:.1f}%")
-                        m2.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
-                        m3.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
-                        m4.metric("3着内数", f"{w1+w2+w3}回")
-                        st.dataframe(df_results, use_container_width=True, hide_index=True)
+                        rs = pd.to_numeric(dfr['着順'], errors='coerce'); total = len(dfr)
+                        w1=int((rs==1).sum()); w2=int((rs==2).sum())
+                        w3=int((rs==3).sum()); w4=int((rs>=4).sum())
+                        st.markdown(f"### {total}戦{w1}勝　<span style='color:#555'>({w1}-{w2}-{w3}-{w4})</span>",
+                                    unsafe_allow_html=True)
+                        m1,m2,m3,m4 = st.columns(4)
+                        m1.metric("勝率",   f"{w1/total*100:.1f}%")
+                        m2.metric("連対率", f"{(w1+w2)/total*100:.1f}%")
+                        m3.metric("複勝率", f"{(w1+w2+w3)/total*100:.1f}%")
+                        m4.metric("3着内数",f"{w1+w2+w3}回")
+                        st.dataframe(dfr, use_container_width=True, hide_index=True)
                         st.subheader("競馬場別 出走数")
-                        st.bar_chart(df_results['競馬場'].value_counts())
+                        st.bar_chart(dfr['競馬場'].value_counts())
                 except Exception as e:
                     st.error(f"エラーが発生しました: {e}")
 
-    # ── TAB 3: カスタム分析 ────────────────────────
+    # ── TAB 3: 産駒分析 ────────────────────────────
     with tab3:
+        st.subheader("産駒分析")
+        st.caption("分析軸を切り替えて、エフフォーリア産駒の傾向を探りましょう")
+        try:
+            render_overall_summary()
+        except Exception as e:
+            st.warning(f"サマリーの取得に失敗しました: {e}")
+        st.markdown("---")
+
+        axis_tabs = st.tabs(["母父別", "生産者別", "騎手別", "馬主別"])
+        axes      = ["母父別", "生産者別", "騎手別", "馬主別"]
+        axis_desc = {
+            "母父別":   "母父（ブルードメアサイアー）ごとの産駒傾向。どの血統との配合が成績に結びつきやすいかを確認できます。",
+            "生産者別": "生産牧場ごとの産駒数・成績。どの牧場がエフフォーリア産駒を多く手がけているかを比較できます。",
+            "騎手別":   "騎手ごとの騎乗成績。エフフォーリア産駒と相性の良い騎手を探しましょう。",
+            "馬主別":   "馬主ごとの出走・勝利実績。各レースエントリー時点の馬主を基に集計します。",
+        }
+        for axis_tab, axis_key in zip(axis_tabs, axes):
+            with axis_tab:
+                st.markdown(f"<div class='analysis-card'>{axis_desc[axis_key]}</div>",
+                            unsafe_allow_html=True)
+                top_n = st.slider("表示件数", min_value=5, max_value=30, value=15, step=5,
+                                  key=f"topn_{axis_key}")
+                try:
+                    render_analysis_section(axis_key, top_n=top_n)
+                except Exception as e:
+                    st.error(f"分析データの取得に失敗しました: {e}")
+
+    # ── TAB 4: カスタム分析 ────────────────────────
+    with tab4:
         st.subheader("カスタム分析")
         st.caption("X軸・指標・絞り込み条件を自由に組み合わせてグラフと表を生成します")
 
-        # ── コントロール ──────────────────────────
         ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
         axis_label   = ctrl1.selectbox(
             "X軸（集計軸）",
@@ -746,23 +798,24 @@ else:
             ['出走数', '勝利数', '連対数', '3着内数', '勝率(%)', '連対率(%)', '複勝率(%)'],
             key="custom_metric"
         )
-        min_runs = ctrl3.number_input(
-            "最低出走数", min_value=1, max_value=200, value=5, step=1, key="custom_min_runs"
-        )
+        min_runs = ctrl3.number_input("最低出走数", min_value=1, max_value=200, value=5, step=1,
+                                      key="custom_min_runs")
 
-        # ── 絞り込み条件 ──────────────────────────
         with st.expander("絞り込み条件"):
             f1, f2 = st.columns(2)
             surface_filter   = f1.multiselect("馬場種別", ['芝', 'ダート'], default=[], key="custom_surface")
             condition_filter = f2.multiselect("馬場状態", ['良', '稍重', '重', '不良'], default=[], key="custom_condition")
             d1, d2 = st.columns(2)
-            dist_from = d1.number_input("距離 From (m)", min_value=800,  max_value=4300, value=800,  step=100, key="custom_dist_from")
-            dist_to   = d2.number_input("距離 To (m)",   min_value=800,  max_value=4300, value=3600, step=100, key="custom_dist_to")
+            dist_from = d1.number_input("距離 From (m)", min_value=800, max_value=4300, value=800,
+                                        step=100, key="custom_dist_from")
+            dist_to   = d2.number_input("距離 To (m)",   min_value=800, max_value=4300, value=3600,
+                                        step=100, key="custom_dist_to")
             y1, y2 = st.columns(2)
-            year_from = y1.number_input("開催年 From", min_value=2024, max_value=2035, value=2024, step=1, key="custom_year_from")
-            year_to   = y2.number_input("開催年 To",   min_value=2024, max_value=2035, value=2026, step=1, key="custom_year_to")
+            year_from = y1.number_input("開催年 From", min_value=2024, max_value=2035, value=2024,
+                                        step=1, key="custom_year_from")
+            year_to   = y2.number_input("開催年 To",   min_value=2024, max_value=2035, value=2026,
+                                        step=1, key="custom_year_to")
 
-        # ── X軸の定義 ─────────────────────────────
         AXIS_CONFIG = {
             '生産者': dict(
                 select="COALESCE(b.breeder_name, '不明') AS 軸",
@@ -779,27 +832,11 @@ else:
                 extra_join="LEFT JOIN jockeys j ON re.jockey_id = j.jockey_id",
                 group="COALESCE(j.jockey_name, '不明')"
             ),
-            '競馬場': dict(
-                select="t.track_name AS 軸",
-                extra_join="",
-                group="t.track_name"
-            ),
-            '馬場種別': dict(
-                select="r.surface_type AS 軸",
-                extra_join="",
-                group="r.surface_type"
-            ),
-            '馬場状態': dict(
-                select="r.track_condition AS 軸",
-                extra_join="",
-                group="r.track_condition"
-            ),
-            'クラス': dict(
-                select="r.race_class AS 軸",
-                extra_join="",
-                group="r.race_class"
-            ),
-            '距離区分': dict(
+            '競馬場': dict(select="t.track_name AS 軸",   extra_join="", group="t.track_name"),
+            '馬場種別': dict(select="r.surface_type AS 軸",  extra_join="", group="r.surface_type"),
+            '馬場状態': dict(select="r.track_condition AS 軸", extra_join="", group="r.track_condition"),
+            'クラス':   dict(select="r.race_class AS 軸",    extra_join="", group="r.race_class"),
+            '距離帯': dict(
                 select="""CASE
                     WHEN r.distance_meters < 1301 THEN '短距離(~1300m)'
                     WHEN r.distance_meters < 1900 THEN 'マイル(1301~1899m)'
@@ -815,40 +852,34 @@ else:
         }
 
         axis_cfg = AXIS_CONFIG[axis_label]
-
-        # ── SQLを組み立て ─────────────────────────
         sql_custom = f"""
             SELECT
                 {axis_cfg['select']},
-                COUNT(re.entry_id)                                              AS 出走数,
-                SUM(CASE WHEN re.final_rank = 1  THEN 1 ELSE 0 END)            AS 勝利数,
-                SUM(CASE WHEN re.final_rank <= 2 THEN 1 ELSE 0 END)            AS 連対数,
-                SUM(CASE WHEN re.final_rank <= 3 THEN 1 ELSE 0 END)            AS 複勝数
+                COUNT(re.entry_id)                                   AS 出走数,
+                SUM(CASE WHEN re.final_rank=1  THEN 1 ELSE 0 END)   AS 勝利数,
+                SUM(CASE WHEN re.final_rank<=2 THEN 1 ELSE 0 END)   AS 連対数,
+                SUM(CASE WHEN re.final_rank<=3 THEN 1 ELSE 0 END)   AS 複勝数
             FROM horses h
-            JOIN raceentries re ON h.horse_id = re.horse_id
-            JOIN races r        ON re.race_id  = r.race_id
-            JOIN tracks t       ON r.track_id  = t.track_id
+            JOIN raceentries re ON h.horse_id=re.horse_id
+            JOIN races r        ON re.race_id=r.race_id
+            JOIN tracks t       ON r.track_id=t.track_id
             {axis_cfg['extra_join']}
-            WHERE h.sire_id = 222
+            WHERE h.sire_id=222
               AND r.distance_meters BETWEEN %s AND %s
               AND YEAR(r.race_date) BETWEEN %s AND %s
         """
         custom_params = [dist_from, dist_to, year_from, year_to]
-
         if surface_filter:
-            sql_custom += " AND r.surface_type IN ({})".format(','.join(['%s'] * len(surface_filter)))
+            sql_custom += " AND r.surface_type IN ({})".format(','.join(['%s']*len(surface_filter)))
             custom_params.extend(surface_filter)
         if condition_filter:
-            sql_custom += " AND r.track_condition IN ({})".format(','.join(['%s'] * len(condition_filter)))
+            sql_custom += " AND r.track_condition IN ({})".format(','.join(['%s']*len(condition_filter)))
             custom_params.extend(condition_filter)
-
         sql_custom += f" GROUP BY {axis_cfg['group']} HAVING COUNT(re.entry_id) >= %s"
         custom_params.append(min_runs)
 
         try:
-            import altair as alt
             df_custom = run_query(sql_custom, custom_params)
-
             if df_custom.empty:
                 st.info("条件に合うデータがありません。絞り込み条件を緩めてください。")
             else:
@@ -867,42 +898,47 @@ else:
                 st.altair_chart(chart, use_container_width=True)
 
                 st.dataframe(
-                    df_custom[['軸', '出走数', '勝利数', '連対数', '3着内数', '勝率(%)', '連対率(%)', '複勝率(%)']].rename(columns={'軸': axis_label}),
-                    use_container_width=True,
-                    hide_index=True
+                    df_custom[['軸','出走数','勝利数','連対数','3着内数','勝率(%)','連対率(%)','複勝率(%)']]
+                    .rename(columns={'軸': axis_label}),
+                    use_container_width=True, hide_index=True
                 )
         except Exception as e:
             st.error(f"分析に失敗しました: {e}")
 
-    # ── TAB 4: コラム・記事 ─────────────────────────
-    # ── TAB 4: 条件検索 ────────────────────────────
-    with tab4:
-        st.subheader(" 条件を指定して戦績を検索")
+    # ── TAB 5: 条件検索 ────────────────────────────
+    with tab5:
+        st.subheader("条件を指定して戦績を検索")
         st.caption("複数の条件を組み合わせて出走履歴と統計を表示します。条件を指定しない項目は全て対象になります。")
         st.markdown("---")
 
-        # ── 絞り込み条件 ──────────────────────────
-        with st.expander(" 絞り込み条件", expanded=True):
+        with st.expander("絞り込み条件", expanded=True):
             fc1, fc2, fc3 = st.columns(3)
-
-            surface_sel   = fc1.multiselect("馬場種別", ["芝", "ダート"], key="cs_surface")
-            condition_sel = fc2.multiselect("馬場状態", ["良", "稍重", "重", "不良"], key="cs_condition")
-            gender_sel    = fc3.multiselect("性別", ["牡", "牝", "騸"], key="cs_gender")
+            surface_sel   = fc1.multiselect("馬場種別", ["芝","ダート"], key="cs_surface")
+            condition_sel = fc2.multiselect("馬場状態", ["良","稍重","重","不良"], key="cs_condition")
+            gender_sel    = fc3.multiselect("性別", ["牡","牝","騸"], key="cs_gender")
 
             fd1, fd2, fd3 = st.columns(3)
-            dist_from = fd1.number_input("距離 From (m)", min_value=800, max_value=4300, value=800,  step=100, key="cs_dist_from")
-            dist_to   = fd2.number_input("距離 To (m)",   min_value=800, max_value=4300, value=4300, step=100, key="cs_dist_to")
-            class_sel = fd3.multiselect("クラス", ["新馬", "未勝利", "1勝クラス", "2勝クラス", "3勝クラス", "オープン", "G3", "G2", "G1"], key="cs_class")
+            cs_dist_from = fd1.number_input("距離 From (m)", min_value=800, max_value=4300,
+                                            value=800, step=100, key="cs_dist_from")
+            cs_dist_to   = fd2.number_input("距離 To (m)",   min_value=800, max_value=4300,
+                                            value=4300, step=100, key="cs_dist_to")
+            class_sel    = fd3.multiselect("クラス",
+                ["新馬","未勝利","1勝クラス","2勝クラス","3勝クラス","オープン","G3","G2","G1"],
+                key="cs_class"
+            )
 
             fy1, fy2, fy3 = st.columns(3)
-            year_from    = fy1.number_input("開催年 From", min_value=2020, max_value=2030, value=2024, step=1, key="cs_year_from")
-            year_to      = fy2.number_input("開催年 To",   min_value=2020, max_value=2030, value=2026, step=1, key="cs_year_to")
-            style_sel    = fy3.multiselect("脚質", ["逃げ", "先行", "差し", "追込"], key="cs_style")
+            cs_year_from = fy1.number_input("開催年 From", min_value=2020, max_value=2030,
+                                            value=2024, step=1, key="cs_year_from")
+            cs_year_to   = fy2.number_input("開催年 To",   min_value=2020, max_value=2030,
+                                            value=2026, step=1, key="cs_year_to")
+            style_sel    = fy3.multiselect("脚質", ["逃げ","先行","差し","追込"], key="cs_style")
 
-            # 競馬場・形態の選択肢をDBから取得
             try:
                 df_tracks_opt = run_query("SELECT DISTINCT track_name FROM tracks ORDER BY track_name")
-                df_dir_opt    = run_query("SELECT DISTINCT course_direction FROM tracks WHERE course_direction IS NOT NULL ORDER BY course_direction")
+                df_dir_opt    = run_query(
+                    "SELECT DISTINCT course_direction FROM tracks WHERE course_direction IS NOT NULL ORDER BY course_direction"
+                )
                 track_options = df_tracks_opt['track_name'].tolist()
                 dir_options   = df_dir_opt['course_direction'].tolist()
             except Exception:
@@ -917,37 +953,26 @@ else:
             jockey_input  = fj1.text_input("騎手名（部分一致）", key="cs_jockey")
             trainer_input = fj2.text_input("調教師名（部分一致）", key="cs_trainer")
 
-        # ── SQL組み立て ───────────────────────────
         sql_cs = """
-            SELECT
-                h.horse_name       AS 馬名,
-                h.gender           AS 性別,
-                r.race_date        AS 開催日,
-                r.race_name        AS レース名,
-                t.track_name       AS 競馬場,
-                t.course_direction AS コース方向,
-                r.distance_meters  AS 距離_m,
-                r.surface_type     AS 馬場種別,
-                r.track_condition  AS 馬場状態,
-                r.race_class       AS クラス,
-                re.final_rank      AS 着順,
-                re.time_seconds    AS タイム_秒,
-                re.running_style   AS 脚質,
-                re.race_pace       AS ペース,
-                re.Weight          AS 斤量,
-                j.jockey_name      AS 騎手,
-                tr.trainer_name    AS 調教師
+            SELECT h.horse_name AS 馬名, h.gender AS 性別,
+                   r.race_date AS 開催日, r.race_name AS レース名,
+                   t.track_name AS 競馬場, t.course_direction AS コース方向,
+                   r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
+                   r.track_condition AS 馬場状態, r.race_class AS クラス,
+                   re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                   re.running_style AS 脚質, re.race_pace AS ペース,
+                   re.Weight AS 斤量, j.jockey_name AS 騎手, tr.trainer_name AS 調教師
             FROM raceentries re
-            JOIN horses  h  ON re.horse_id  = h.horse_id
-            JOIN races   r  ON re.race_id   = r.race_id
-            JOIN tracks  t  ON r.track_id   = t.track_id
-            LEFT JOIN jockeys  j  ON re.jockey_id  = j.jockey_id
-            LEFT JOIN trainers tr ON re.trainer_id = tr.trainer_id
-            WHERE h.sire_id = 222
+            JOIN horses  h  ON re.horse_id=h.horse_id
+            JOIN races   r  ON re.race_id=r.race_id
+            JOIN tracks  t  ON r.track_id=t.track_id
+            LEFT JOIN jockeys  j  ON re.jockey_id=j.jockey_id
+            LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
+            WHERE h.sire_id=222
               AND r.distance_meters BETWEEN %s AND %s
-              AND YEAR(r.race_date)  BETWEEN %s AND %s
+              AND YEAR(r.race_date) BETWEEN %s AND %s
         """
-        cs_params = [dist_from, dist_to, year_from, year_to]
+        cs_params = [cs_dist_from, cs_dist_to, cs_year_from, cs_year_to]
 
         if surface_sel:
             sql_cs += f" AND r.surface_type IN ({','.join(['%s']*len(surface_sel))})"
@@ -971,97 +996,66 @@ else:
             sql_cs += f" AND t.course_direction IN ({','.join(['%s']*len(dir_sel))})"
             cs_params.extend(dir_sel)
         if jockey_input:
-            sql_cs += " AND j.jockey_name LIKE %s"
-            cs_params.append(f"%{jockey_input}%")
+            sql_cs += " AND j.jockey_name LIKE %s"; cs_params.append(f"%{jockey_input}%")
         if trainer_input:
-            sql_cs += " AND tr.trainer_name LIKE %s"
-            cs_params.append(f"%{trainer_input}%")
-
+            sql_cs += " AND tr.trainer_name LIKE %s"; cs_params.append(f"%{trainer_input}%")
         sql_cs += " ORDER BY r.race_date DESC"
 
         try:
             df_cs = run_query(sql_cs, cs_params)
-
             if df_cs.empty:
                 st.info("条件に合う出走記録が見つかりませんでした。")
             else:
-                # ── 統計サマリー ──────────────────────
                 rank_series = pd.to_numeric(df_cs['着順'], errors='coerce')
                 total = len(df_cs)
-                w1 = int((rank_series == 1).sum())
-                w2 = int((rank_series == 2).sum())
-                w3 = int((rank_series == 3).sum())
-                w4 = int((rank_series >= 4).sum())
-
+                w1=int((rank_series==1).sum()); w2=int((rank_series==2).sum())
+                w3=int((rank_series==3).sum()); w4=int((rank_series>=4).sum())
                 st.markdown(
                     f"### {total}戦{w1}勝　"
                     f"<span style='font-size:1.1em; color:#555;'>({w1}-{w2}-{w3}-{w4})</span>",
                     unsafe_allow_html=True
                 )
-                m1, m2, m3, m4, m5 = st.columns(5)
+                m1,m2,m3,m4,m5 = st.columns(5)
                 m1.metric("出走数",   f"{total}回")
                 m2.metric("勝率",    f"{w1/total*100:.1f}%")
                 m3.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
                 m4.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
                 m5.metric("3着内数", f"{w1+w2+w3}回")
-
                 st.markdown("---")
-
-                # ── 出走履歴テーブル ──────────────────
                 st.subheader(f"出走履歴（{total}件）")
                 st.dataframe(df_cs, use_container_width=True, hide_index=True)
-
         except Exception as e:
             st.error(f"検索に失敗しました: {e}")
 
-    # ── TAB 5: コラム・記事 ─────────────────────────
-    with tab5:
+    # ── TAB 6: 記事・コラム ─────────────────────────
+    with tab6:
         st.subheader("エフフォーリア産駒に関する考察・コラム")
+        if st.session_state.is_admin:
+            st.caption("`{{image:ラベル}}` で画像挿入 / `{{graph:母父別}}` などでグラフ挿入")
         st.markdown("---")
-
-        sql_articles = """
-            SELECT
-                article_id,
-                title
-            FROM articles
-            ORDER BY created_at DESC
-        """
         try:
-            df_articles = run_query(sql_articles)
-            if df_articles.empty:
+            dfa = run_query("""
+                SELECT article_id, title,
+                       DATE_FORMAT(created_at,'%Y-%m-%d %H:%i') AS post_date
+                FROM articles ORDER BY created_at DESC
+            """)
+            if dfa.empty:
                 st.info("現在、掲載されている記事はありません。")
             else:
-                for _, row in df_articles.iterrows():
+                for _, row in dfa.iterrows():
                     aid = row['article_id']
-
+                    ct, cd, cb = st.columns([5, 2, 1])
+                    ct.button(row['title'], key=f"article_btn_{aid}",
+                              on_click=go_article, args=(aid,), use_container_width=True)
+                    cd.markdown(
+                        f"<div style='padding-top:8px;color:#888;font-size:0.85em'>{row['post_date']}</div>",
+                        unsafe_allow_html=True
+                    )
                     if st.session_state.is_admin:
-                        col_title, col_btn = st.columns([9, 1])
-                        col_title.button(
-                            f"📄 {row['title']}",
-                            key=f"article_btn_{aid}",
-                            on_click=go_article,
-                            args=(aid,),
-                            use_container_width=True
-                        )
-                        if col_btn.button("🗑️", key=f"del_{aid}"):
-                            conn = get_connection()
-                            cursor = conn.cursor()
-                            cursor.execute("DELETE FROM article_images WHERE article_id = %s", (aid,))
-                            cursor.execute("DELETE FROM articles WHERE article_id = %s", (aid,))
-                            conn.commit()
-                            cursor.close()
-                            conn.close()
+                        if cb.button("削除", key=f"del_{aid}"):
+                            run_write("DELETE FROM article_images WHERE article_id=%s", [aid])
+                            run_write("DELETE FROM articles WHERE article_id=%s", [aid])
                             st.rerun()
-                    else:
-                        st.button(
-                            f" {row['title']}",
-                            key=f"article_btn_{aid}",
-                            on_click=go_article,
-                            args=(aid,),
-                            use_container_width=True
-                        )
-
                     st.markdown("---")
-
         except Exception as e:
             st.error(f"記事の読み込みに失敗しました: {e}")
