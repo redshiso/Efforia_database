@@ -138,7 +138,8 @@ def render_overall_summary():
 # ─────────────────────────────────────────
 # 産駒分析グラフ＋考察＋画像
 # ─────────────────────────────────────────
-def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026):
+def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
+                            foal_year_from=None, foal_year_to=None):
     axis_map = {
         '母父別':   ('hf.broodmare_sire_name', '母父'),
         '生産者別': ('hf.breeder_name',         '生産者'),
@@ -161,6 +162,7 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026):
         LEFT JOIN trainers tr          ON re.trainer_id=tr.trainer_id
         WHERE h.sire_id=222 AND {col_expr} IS NOT NULL
           AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
+          {"AND YEAR(h.date_of_birth) BETWEEN " + str(foal_year_from) + " AND " + str(foal_year_to) if foal_year_from and foal_year_to else ""}
         GROUP BY {col_expr}
         HAVING 出走数 > 0
         ORDER BY 出走数 DESC
@@ -772,11 +774,21 @@ else:
             st.warning(f"サマリーの取得に失敗しました: {e}")
         st.markdown("---")
 
-        ay1, ay2 = st.columns(2)
-        analysis_year_from = ay1.number_input("開催年 From", min_value=2020, max_value=2035,
-                                              value=2024, step=1, key="analysis_year_from")
-        analysis_year_to   = ay2.number_input("開催年 To",   min_value=2020, max_value=2035,
-                                              value=2026, step=1, key="analysis_year_to")
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            st.markdown("**開催年**")
+            ay1, ay2 = st.columns(2)
+            analysis_year_from = ay1.number_input("From", min_value=2020, max_value=2035,
+                                                  value=2024, step=1, key="analysis_year_from")
+            analysis_year_to   = ay2.number_input("To",   min_value=2020, max_value=2035,
+                                                  value=2026, step=1, key="analysis_year_to")
+        with fc2:
+            st.markdown("**産年（世代）**")
+            fy1, fy2 = st.columns(2)
+            analysis_foal_from = fy1.number_input("From", min_value=2000, max_value=2040,
+                                                  value=2022, step=1, key="analysis_foal_from")
+            analysis_foal_to   = fy2.number_input("To",   min_value=2000, max_value=2040,
+                                                  value=2024, step=1, key="analysis_foal_to")
         st.markdown("---")
 
         axis_tabs = st.tabs(["母父別", "生産者別", "騎手別", "馬主別"])
@@ -796,7 +808,9 @@ else:
                 try:
                     render_analysis_section(axis_key, top_n=top_n,
                                             year_from=analysis_year_from,
-                                            year_to=analysis_year_to)
+                                            year_to=analysis_year_to,
+                                            foal_year_from=analysis_foal_from,
+                                            foal_year_to=analysis_foal_to)
                 except Exception as e:
                     st.error(f"分析データの取得に失敗しました: {e}")
 
