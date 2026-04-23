@@ -69,12 +69,6 @@ def run_write(sql, params=None):
     cursor.execute(sql, params or [])
     conn.commit(); cursor.close(); conn.close()
 
-# ─────────────────────────────────────────
-# 訪問カウント（セッション開始時に1回だけDB更新）
-# ─────────────────────────────────────────
-def get_views():
-    df = run_query("SELECT views FROM page_views WHERE id=1")
-    return int(df.iloc[0]['views']) if not df.empty else 0
 
 # ─────────────────────────────────────────
 # 分析ノート
@@ -144,7 +138,7 @@ def render_overall_summary():
 # ─────────────────────────────────────────
 # 産駒分析グラフ＋考察＋画像
 # ─────────────────────────────────────────
-def render_analysis_section(axis_key, top_n=15):
+def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026):
     axis_map = {
         '母父別':   ('hf.broodmare_sire_name', '母父'),
         '生産者別': ('hf.breeder_name',         '生産者'),
@@ -162,9 +156,11 @@ def render_analysis_section(axis_key, top_n=15):
         FROM horses h
         LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
         LEFT JOIN raceentries re       ON h.horse_id=re.horse_id
+        LEFT JOIN races r              ON re.race_id=r.race_id
         LEFT JOIN jockeys  j           ON re.jockey_id=j.jockey_id
         LEFT JOIN trainers tr          ON re.trainer_id=tr.trainer_id
         WHERE h.sire_id=222 AND {col_expr} IS NOT NULL
+          AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
         GROUP BY {col_expr}
         HAVING 出走数 > 0
         ORDER BY 出走数 DESC
@@ -294,10 +290,6 @@ for k, v in [('page','list'), ('selected_horse_id',None),
     if k not in st.session_state:
         st.session_state[k] = v
 
-# セッション開始時に1回だけカウントアップ
-if 'visited' not in st.session_state:
-    run_write("UPDATE page_views SET views=views+1 WHERE id=1")
-    st.session_state.visited = True
 
 def go_detail(horse_id, horse_name):
     st.session_state.selected_horse_id   = horse_id
@@ -574,8 +566,6 @@ else:
 
     # サイドバー
     st.sidebar.markdown("---")
-    total_views = get_views()
-    st.sidebar.caption(f"あなたは: {total_views} 人目の武史です。")
     st.sidebar.header("検索条件")
     horse_name_input = st.sidebar.text_input("馬名（一部でも可）", value="")
     selected_gender  = st.sidebar.radio("性別", ["すべて","牡","牝","騸"])
@@ -782,6 +772,13 @@ else:
             st.warning(f"サマリーの取得に失敗しました: {e}")
         st.markdown("---")
 
+        ay1, ay2 = st.columns(2)
+        analysis_year_from = ay1.number_input("開催年 From", min_value=2020, max_value=2035,
+                                              value=2024, step=1, key="analysis_year_from")
+        analysis_year_to   = ay2.number_input("開催年 To",   min_value=2020, max_value=2035,
+                                              value=2026, step=1, key="analysis_year_to")
+        st.markdown("---")
+
         axis_tabs = st.tabs(["母父別", "生産者別", "騎手別", "馬主別"])
         axes      = ["母父別", "生産者別", "騎手別", "馬主別"]
         axis_desc = {
@@ -797,7 +794,9 @@ else:
                 top_n = st.slider("表示件数", min_value=5, max_value=30, value=15, step=5,
                                   key=f"topn_{axis_key}")
                 try:
-                    render_analysis_section(axis_key, top_n=top_n)
+                    render_analysis_section(axis_key, top_n=top_n,
+                                            year_from=analysis_year_from,
+                                            year_to=analysis_year_to)
                 except Exception as e:
                     st.error(f"分析データの取得に失敗しました: {e}")
 
