@@ -583,6 +583,40 @@ else:
     yc1,yc2 = st.sidebar.columns(2)
     birth_year_from = yc1.number_input("From", min_value=2000, max_value=2040, value=2022, step=1)
     birth_year_to   = yc2.number_input("To",   min_value=2000, max_value=2040, value=2024, step=1)
+
+    try:
+        color_df = run_query(
+            "SELECT DISTINCT color FROM horses WHERE sire_id=222 AND color IS NOT NULL ORDER BY color"
+        )
+        color_options = color_df['color'].tolist()
+    except Exception:
+        color_options = []
+    color_sel  = st.sidebar.multiselect("毛色", color_options)
+    region_sel = st.sidebar.multiselect("所属", ["美浦", "栗東", "地方"])
+
+    try:
+        loc_df = run_query(
+            "SELECT DISTINCT b.location FROM horses h "
+            "JOIN breeders b ON h.breeder_id=b.breeder_id "
+            "WHERE h.sire_id=222 AND b.location IS NOT NULL ORDER BY b.location"
+        )
+        location_options = loc_df['location'].tolist()
+    except Exception:
+        location_options = []
+    location_sel = st.sidebar.multiselect("生産地", location_options)
+
+    try:
+        bms_df = run_query(
+            "SELECT DISTINCT hf.broodmare_sire_name FROM horses h "
+            "JOIN horses_formatted hf ON h.horse_id=hf.horse_id "
+            "WHERE h.sire_id=222 AND hf.broodmare_sire_name IS NOT NULL "
+            "ORDER BY hf.broodmare_sire_name"
+        )
+        bms_options = bms_df['broodmare_sire_name'].tolist()
+    except Exception:
+        bms_options = []
+    bms_sel = st.sidebar.multiselect("母父", bms_options)
+
     st.sidebar.markdown("---")
     st.sidebar.caption("※ 馬名は部分一致で検索します")
 
@@ -637,6 +671,8 @@ else:
             FROM horses h
             LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
             LEFT JOIN raceentries re ON h.horse_id=re.horse_id
+            LEFT JOIN trainers tr ON h.trainer_id=tr.trainer_id
+            LEFT JOIN breeders b ON h.breeder_id=b.breeder_id
             WHERE h.sire_id=222
         """
         params = []
@@ -646,6 +682,26 @@ else:
             sql += " AND h.gender=%s"; params.append(selected_gender)
         sql += " AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
         params.extend([birth_year_from, birth_year_to])
+        if color_sel:
+            sql += f" AND h.color IN ({','.join(['%s']*len(color_sel))})"
+            params.extend(color_sel)
+        if region_sel:
+            region_parts = []
+            if '美浦' in region_sel:
+                region_parts.append("tr.region = '美浦'")
+            if '栗東' in region_sel:
+                region_parts.append("tr.region = '栗東'")
+            if '地方' in region_sel:
+                region_parts.append(
+                    "(tr.region IS NOT NULL AND tr.region NOT IN ('美浦', '栗東'))"
+                )
+            sql += f" AND ({' OR '.join(region_parts)})"
+        if location_sel:
+            sql += f" AND b.location IN ({','.join(['%s']*len(location_sel))})"
+            params.extend(location_sel)
+        if bms_sel:
+            sql += f" AND hf.broodmare_sire_name IN ({','.join(['%s']*len(bms_sel))})"
+            params.extend(bms_sel)
         sql += " GROUP BY h.horse_id,h.horse_name,h.date_of_birth,h.gender,h.color,hf.dam_name,hf.breeder_name"
 
         try:
@@ -668,42 +724,6 @@ else:
                     c1.write(str(row['生年月日'])); c2.write(row['性別'])
                     c3.write(row['毛色'] or '―'); c4.write(row['母名'] or '―'); c5.write(row['戦績'])
 
-                st.markdown("---")
-                gc1,gc2 = st.columns(2)
-                with gc1:
-                    st.subheader("毛色の内訳")
-                    cc2 = df_horses['毛色'].fillna('不明').value_counts().reset_index()
-                    cc2.columns = ['毛色','頭数']
-                    st.altair_chart(
-                        alt.Chart(cc2).mark_bar(cornerRadiusTopLeft=3,cornerRadiusTopRight=3).encode(
-                            x=alt.X('毛色:N', sort=cc2['毛色'].tolist(), title=None,
-                                    axis=alt.Axis(labelAngle=-45)),
-                            y=alt.Y('頭数:Q'), tooltip=['毛色','頭数']
-                        ).properties(height=350), use_container_width=True
-                    )
-                with gc2:
-                    st.subheader("生産地別 頭数")
-                    sloc = ("SELECT b.location AS 生産地 FROM horses h "
-                            "LEFT JOIN breeders b ON h.breeder_id=b.breeder_id WHERE h.sire_id=222")
-                    lp = []
-                    if horse_name_input: sloc+=" AND h.horse_name LIKE %s"; lp.append(f"%{horse_name_input}%")
-                    if selected_gender!="すべて": sloc+=" AND h.gender=%s"; lp.append(selected_gender)
-                    sloc+=" AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
-                    lp.extend([birth_year_from, birth_year_to])
-                    dfl = run_query(sloc, lp)
-                    lc  = dfl['生産地'].fillna('不明').value_counts()
-                    top9 = lc.head(9).reset_index(); top9.columns = ['生産地','頭数']
-                    dflc = pd.concat(
-                        [top9, pd.DataFrame([{'生産地':'その他','頭数':lc.iloc[9:].sum()}])],
-                        ignore_index=True
-                    )
-                    st.altair_chart(
-                        alt.Chart(dflc).mark_bar(cornerRadiusTopLeft=3,cornerRadiusTopRight=3).encode(
-                            x=alt.X('生産地:N', sort=dflc['生産地'].tolist(), title=None,
-                                    axis=alt.Axis(labelAngle=-45)),
-                            y=alt.Y('頭数:Q'), tooltip=['生産地','頭数']
-                        ).properties(height=350), use_container_width=True
-                    )
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
 
