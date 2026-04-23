@@ -70,17 +70,11 @@ def run_write(sql, params=None):
     conn.commit(); cursor.close(); conn.close()
 
 # ─────────────────────────────────────────
-# アクセスカウンター
+# 訪問カウント（セッション開始時に1回だけDB更新）
 # ─────────────────────────────────────────
-def update_and_get_views():
-    conn = get_connection(); cursor = conn.cursor()
-    if 'visited' not in st.session_state:
-        cursor.execute("UPDATE page_views SET views=views+1 WHERE id=1")
-        conn.commit(); st.session_state.visited = True
-    cursor.execute("SELECT views FROM page_views WHERE id=1")
-    views = cursor.fetchone()[0]
-    cursor.close(); conn.close()
-    return views
+def get_views():
+    df = run_query("SELECT views FROM page_views WHERE id=1")
+    return int(df.iloc[0]['views']) if not df.empty else 0
 
 # ─────────────────────────────────────────
 # 分析ノート
@@ -299,6 +293,11 @@ for k, v in [('page','list'), ('selected_horse_id',None),
              ('edit_article_id',None), ('is_admin',False)]:
     if k not in st.session_state:
         st.session_state[k] = v
+
+# セッション開始時に1回だけカウントアップ
+if 'visited' not in st.session_state:
+    run_write("UPDATE page_views SET views=views+1 WHERE id=1")
+    st.session_state.visited = True
 
 def go_detail(horse_id, horse_name):
     st.session_state.selected_horse_id   = horse_id
@@ -575,7 +574,7 @@ else:
 
     # サイドバー
     st.sidebar.markdown("---")
-    total_views = update_and_get_views()
+    total_views = get_views()
     st.sidebar.caption(f"あなたは: {total_views} 人目の武史です。")
     st.sidebar.header("検索条件")
     horse_name_input = st.sidebar.text_input("馬名（一部でも可）", value="")
