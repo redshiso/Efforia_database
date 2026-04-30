@@ -641,6 +641,291 @@ else:
                     else:
                         st.warning("タイトルと本文を入力してください。")
 
+            st.markdown("---")
+            st.markdown("**産駒データ一括登録**")
+
+            # CSVテンプレートのダウンロード
+            _template_cols = [
+                "馬名", "生年月日", "性別", "毛色",
+                "母名", "母父名",
+                "調教師名", "所属",
+                "生産牧場名", "生産地",
+                "馬主名", "血統"
+            ]
+            _template_csv = ",".join(_template_cols) + "\n" \
+                + ",".join(["サンプル花子", "2025-02-14", "牝", "鹿毛",
+                             "サンプル母", "ディープインパクト",
+                             "田中調教師", "美浦",
+                             "〇〇牧場", "北海道",
+                             "田中オーナー", ""]) + "\n"
+            st.download_button(
+                "CSVテンプレートをダウンロード",
+                data=_template_csv.encode("utf-8-sig"),
+                file_name="horse_import_template.csv",
+                mime="text/csv",
+                key="dl_template"
+            )
+            st.caption("Excelで編集後、文字コード UTF-8（BOM付き）で保存してアップロードしてください。")
+
+            uploaded_csv = st.file_uploader(
+                "CSVファイルをアップロード", type=["csv"], key="horse_csv_upload"
+            )
+            if uploaded_csv:
+                try:
+                    df_csv = pd.read_csv(uploaded_csv, encoding="utf-8-sig", dtype=str).fillna("")
+                    st.write(f"読み込み: **{len(df_csv)} 頭**")
+                    st.dataframe(df_csv, use_container_width=True, hide_index=True)
+
+                    if st.button("上記データを一括登録する", type="primary", key="bulk_insert_btn"):
+                        conn = get_connection()
+                        cur  = conn.cursor()
+                        ok = skip = err = 0
+                        warnings_list = []
+                        errors = []
+
+                        for _, r in df_csv.iterrows():
+                            horse_name = r.get("馬名", "").strip()
+                            if not horse_name:
+                                continue
+                            try:
+                                # 重複チェック
+                                cur.execute(
+                                    "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                    [horse_name]
+                                )
+                                if cur.fetchone():
+                                    skip += 1
+                                    warnings_list.append(f"{horse_name}：すでに登録済みのためスキップ")
+                                    continue
+
+                                # trainer lookup / insert
+                                trainer_id = None
+                                t_name = r.get("調教師名", "").strip()
+                                t_reg  = r.get("所属", "").strip() or None
+                                if t_name:
+                                    cur.execute(
+                                        "SELECT trainer_id FROM trainers WHERE trainer_name=%s LIMIT 1",
+                                        [t_name]
+                                    )
+                                    row = cur.fetchone()
+                                    trainer_id = row[0] if row else None
+                                    if not trainer_id:
+                                        cur.execute(
+                                            "INSERT INTO trainers (trainer_name, region) VALUES (%s,%s)",
+                                            [t_name, t_reg]
+                                        )
+                                        trainer_id = cur.lastrowid
+
+                                # breeder lookup / insert by name
+                                # breeders テーブルの牧場名列名が判明したら下記を修正
+                                breeder_id = None
+                                b_name = r.get("生産牧場名", "").strip()
+                                b_loc  = r.get("生産地", "").strip() or None
+                                if b_name:
+                                    cur.execute(
+                                        "SELECT breeder_id FROM breeders WHERE breeder_name=%s LIMIT 1",
+                                        [b_name]
+                                    )
+                                    row = cur.fetchone()
+                                    breeder_id = row[0] if row else None
+                                    if not breeder_id:
+                                        cur.execute(
+                                            "INSERT INTO breeders (breeder_name, location) VALUES (%s,%s)",
+                                            [b_name, b_loc]
+                                        )
+                                        breeder_id = cur.lastrowid
+                                elif b_loc:
+                                    cur.execute(
+                                        "SELECT breeder_id FROM breeders WHERE location=%s LIMIT 1",
+                                        [b_loc]
+                                    )
+                                    row = cur.fetchone()
+                                    breeder_id = row[0] if row else None
+                                    if not breeder_id:
+                                        cur.execute(
+                                            "INSERT INTO breeders (location) VALUES (%s)",
+                                            [b_loc]
+                                        )
+                                        breeder_id = cur.lastrowid
+
+                                # dam lookup (self-ref FK, nullable)
+                                dam_id = None
+                                dam_name = r.get("母名", "").strip()
+                                if dam_name:
+                                    cur.execute(
+                                        "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                        [dam_name]
+                                    )
+                                    row = cur.fetchone()
+                                    if row:
+                                        dam_id = row[0]
+                                    else:
+                                        warnings_list.append(
+                                            f"{horse_name}：母「{dam_name}」がDBに未登録（dam_id=NULL）"
+                                        )
+
+                                # broodmare sire lookup (self-ref FK, nullable)
+                                bms_id = None
+                                bms_name = r.get("母父名", "").strip()
+                                if bms_name:
+                                    cur.execute(
+                                        "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                        [bms_name]
+                                    )
+                                    row = cur.fetchone()
+                                    if row:
+                                        bms_id = row[0]
+                                    else:
+                                        warnings_list.append(
+                                            f"{horse_name}：母父「{bms_name}」がDBに未登録（broodmare_sire_id=NULL）"
+                                        )
+
+                                dob = r.get("生年月日", "").strip() or None
+                                cur.execute("""
+                                    INSERT INTO horses
+                                    (horse_name, date_of_birth, gender, color,
+                                     sire_id, dam_id, broodmare_sire_id,
+                                     trainer_id, breeder_id, Owner, bloodline)
+                                    VALUES (%s,%s,%s,%s,222,%s,%s,%s,%s,%s,%s,%s)
+                                """, [
+                                    horse_name, dob,
+                                    r.get("性別","").strip() or None,
+                                    r.get("毛色","").strip() or None,
+                                    dam_id, bms_id,
+                                    trainer_id, breeder_id,
+                                    r.get("馬主名","").strip() or None,
+                                    r.get("血統","").strip() or None
+                                ])
+                                ok += 1
+                            except Exception as row_err:
+                                err += 1
+                                errors.append(f"{horse_name}：{row_err}")
+
+                        conn.commit()
+                        cur.close(); conn.close()
+                        if ok:
+                            st.success(f"{ok} 頭を登録しました。")
+                        if skip:
+                            st.info(f"{skip} 頭はすでに登録済みのためスキップしました。")
+                        if warnings_list:
+                            with st.expander(f"注意事項（{len(warnings_list)} 件）"):
+                                for msg in warnings_list:
+                                    st.warning(msg)
+                        if err:
+                            st.error(f"{err} 件でエラーが発生しました。")
+                            for msg in errors:
+                                st.error(msg)
+                except Exception as e:
+                    st.error(f"CSV読み込みエラー: {e}")
+
+            st.markdown("---")
+            st.markdown("**繁殖馬・種牡馬登録**")
+            st.caption("産駒CSVをインポートする前に、母・母父をここで先に登録してください。")
+
+            _pre_cols = ["馬名", "性別", "生年月日", "毛色", "生産牧場名", "生産地", "父名"]
+            _pre_csv  = ",".join(_pre_cols) + "\n" \
+                + ",".join(["サンプル母", "牝", "2018-04-10", "鹿毛",
+                             "〇〇牧場", "北海道", "ディープインパクト"]) + "\n"
+            st.download_button(
+                "繁殖馬CSVテンプレートをダウンロード",
+                data=_pre_csv.encode("utf-8-sig"),
+                file_name="broodmare_import_template.csv",
+                mime="text/csv",
+                key="dl_pre_template"
+            )
+
+            uploaded_pre_csv = st.file_uploader(
+                "繁殖馬CSVをアップロード", type=["csv"], key="pre_csv_upload"
+            )
+            if uploaded_pre_csv:
+                try:
+                    df_pre = pd.read_csv(uploaded_pre_csv, encoding="utf-8-sig", dtype=str).fillna("")
+                    st.write(f"読み込み: **{len(df_pre)} 頭**")
+                    st.dataframe(df_pre, use_container_width=True, hide_index=True)
+
+                    if st.button("上記データを一括登録する", type="primary", key="pre_insert_btn"):
+                        conn = get_connection()
+                        cur  = conn.cursor()
+                        ok = skip = err = 0
+                        errors = []
+
+                        for _, r in df_pre.iterrows():
+                            h_name = r.get("馬名", "").strip()
+                            if not h_name:
+                                continue
+                            try:
+                                # 重複チェック
+                                cur.execute(
+                                    "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                    [h_name]
+                                )
+                                if cur.fetchone():
+                                    skip += 1
+                                    continue
+
+                                # breeder lookup / insert
+                                b_name = r.get("生産牧場名", "").strip()
+                                b_loc  = r.get("生産地", "").strip() or None
+                                breeder_id = None
+                                if b_name:
+                                    cur.execute(
+                                        "SELECT breeder_id FROM breeders WHERE breeder_name=%s LIMIT 1",
+                                        [b_name]
+                                    )
+                                    row = cur.fetchone()
+                                    breeder_id = row[0] if row else None
+                                    if not breeder_id:
+                                        cur.execute(
+                                            "INSERT INTO breeders (breeder_name, location) VALUES (%s,%s)",
+                                            [b_name, b_loc]
+                                        )
+                                        breeder_id = cur.lastrowid
+                                if not breeder_id:
+                                    errors.append(f"{h_name}：生産牧場名が未入力のためスキップ（breeder_idはNOT NULL）")
+                                    err += 1
+                                    continue
+
+                                # sire lookup (父、nullableなのでなければNULL)
+                                sire_id = None
+                                sire_name = r.get("父名", "").strip()
+                                if sire_name:
+                                    cur.execute(
+                                        "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                        [sire_name]
+                                    )
+                                    row = cur.fetchone()
+                                    sire_id = row[0] if row else None
+
+                                dob = r.get("生年月日", "").strip() or None
+                                cur.execute("""
+                                    INSERT INTO horses
+                                    (horse_name, date_of_birth, gender, color,
+                                     sire_id, breeder_id)
+                                    VALUES (%s,%s,%s,%s,%s,%s)
+                                """, [
+                                    h_name, dob,
+                                    r.get("性別", "").strip() or None,
+                                    r.get("毛色", "").strip() or None,
+                                    sire_id, breeder_id
+                                ])
+                                ok += 1
+                            except Exception as row_err:
+                                err += 1
+                                errors.append(f"{h_name}：{row_err}")
+
+                        conn.commit()
+                        cur.close(); conn.close()
+                        if ok:
+                            st.success(f"{ok} 頭を登録しました。")
+                        if skip:
+                            st.info(f"{skip} 頭はすでに登録済みのためスキップしました。")
+                        if err:
+                            st.error(f"{err} 件でエラーが発生しました。")
+                            for msg in errors:
+                                st.error(msg)
+                except Exception as e:
+                    st.error(f"CSV読み込みエラー: {e}")
+
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "記事・コラム"
     ])
