@@ -1,5 +1,6 @@
 import re
 import base64
+from pathlib import Path
 import streamlit as st
 import mysql.connector
 import pandas as pd
@@ -1369,7 +1370,7 @@ else:
         st.subheader("セリ結果")
         st.caption("※ 価格は税抜き（万円）")
 
-        EXCEL_PATH = r"C:\Users\shimo\OneDrive\デスクトップ\eff_app\エフフォーリア産駒 セリ結果.xlsx"
+        EXCEL_PATH = Path(__file__).parent / "エフフォーリア産駒 セリ結果.xlsx"
 
         @st.cache_data
         def load_seri_data(path):
