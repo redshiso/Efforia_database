@@ -1372,7 +1372,6 @@ else:
 
         EXCEL_PATH = Path(__file__).parent / "エフフォーリア産駒 セリ結果.xlsx"
 
-        @st.cache_data
         def load_seri_data(path):
             wb = openpyxl.load_workbook(path)
             ws = wb.active
