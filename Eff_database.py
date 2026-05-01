@@ -4,6 +4,7 @@ import streamlit as st
 import mysql.connector
 import pandas as pd
 import altair as alt
+import openpyxl
 
 st.set_page_config(page_title="エフフォーリア産駒データベース", layout="wide")
 
@@ -649,14 +650,14 @@ else:
                 "馬名", "生年月日", "性別", "毛色",
                 "母名", "母父名",
                 "調教師名", "所属",
-                "生産牧場名", "生産地",
+                "生産牧場名",
                 "馬主名", "血統"
             ]
             _template_csv = ",".join(_template_cols) + "\n" \
                 + ",".join(["サンプル花子", "2025-02-14", "牝", "鹿毛",
                              "サンプル母", "ディープインパクト",
                              "田中調教師", "美浦",
-                             "〇〇牧場", "北海道",
+                             "〇〇牧場",
                              "田中オーナー", ""]) + "\n"
             st.download_button(
                 "CSVテンプレートをダウンロード",
@@ -701,7 +702,8 @@ else:
                                 # trainer lookup / insert
                                 trainer_id = None
                                 t_name = r.get("調教師名", "").strip()
-                                t_reg  = r.get("所属", "").strip() or None
+                                _reg_raw = r.get("所属", "").strip()
+                                t_reg = {'西': '栗東', '東': '美浦'}.get(_reg_raw, _reg_raw) or None
                                 if t_name:
                                     cur.execute(
                                         "SELECT trainer_id FROM trainers WHERE trainer_name=%s LIMIT 1",
@@ -720,7 +722,6 @@ else:
                                 # breeders テーブルの牧場名列名が判明したら下記を修正
                                 breeder_id = None
                                 b_name = r.get("生産牧場名", "").strip()
-                                b_loc  = r.get("生産地", "").strip() or None
                                 if b_name:
                                     cur.execute(
                                         "SELECT breeder_id FROM breeders WHERE breeder_name=%s LIMIT 1",
@@ -730,21 +731,8 @@ else:
                                     breeder_id = row[0] if row else None
                                     if not breeder_id:
                                         cur.execute(
-                                            "INSERT INTO breeders (breeder_name, location) VALUES (%s,%s)",
-                                            [b_name, b_loc]
-                                        )
-                                        breeder_id = cur.lastrowid
-                                elif b_loc:
-                                    cur.execute(
-                                        "SELECT breeder_id FROM breeders WHERE location=%s LIMIT 1",
-                                        [b_loc]
-                                    )
-                                    row = cur.fetchone()
-                                    breeder_id = row[0] if row else None
-                                    if not breeder_id:
-                                        cur.execute(
-                                            "INSERT INTO breeders (location) VALUES (%s)",
-                                            [b_loc]
+                                            "INSERT INTO breeders (breeder_name) VALUES (%s)",
+                                            [b_name]
                                         )
                                         breeder_id = cur.lastrowid
 
@@ -822,10 +810,10 @@ else:
             st.markdown("**繁殖馬・種牡馬登録**")
             st.caption("産駒CSVをインポートする前に、母・母父をここで先に登録してください。")
 
-            _pre_cols = ["馬名", "性別", "生年月日", "毛色", "生産牧場名", "生産地", "父名"]
+            _pre_cols = ["馬名", "性別", "生年月日", "毛色", "生産牧場名", "父名"]
             _pre_csv  = ",".join(_pre_cols) + "\n" \
                 + ",".join(["サンプル母", "牝", "2018-04-10", "鹿毛",
-                             "〇〇牧場", "北海道", "ディープインパクト"]) + "\n"
+                             "〇〇牧場", "ディープインパクト"]) + "\n"
             st.download_button(
                 "繁殖馬CSVテンプレートをダウンロード",
                 data=_pre_csv.encode("utf-8-sig"),
@@ -865,7 +853,6 @@ else:
 
                                 # breeder lookup / insert
                                 b_name = r.get("生産牧場名", "").strip()
-                                b_loc  = r.get("生産地", "").strip() or None
                                 breeder_id = None
                                 if b_name:
                                     cur.execute(
@@ -876,8 +863,8 @@ else:
                                     breeder_id = row[0] if row else None
                                     if not breeder_id:
                                         cur.execute(
-                                            "INSERT INTO breeders (breeder_name, location) VALUES (%s,%s)",
-                                            [b_name, b_loc]
+                                            "INSERT INTO breeders (breeder_name) VALUES (%s)",
+                                            [b_name]
                                         )
                                         breeder_id = cur.lastrowid
                                 if not breeder_id:
@@ -926,8 +913,8 @@ else:
                 except Exception as e:
                     st.error(f"CSV読み込みエラー: {e}")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "記事・コラム"
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "記事・コラム", "セリ結果"
     ])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
@@ -1376,3 +1363,88 @@ else:
                     st.markdown("---")
         except Exception as e:
             st.error(f"記事の読み込みに失敗しました: {e}")
+
+    # ── TAB 7: セリ結果 ─────────────────────────────
+    with tab7:
+        st.subheader("セリ結果")
+        st.caption("※ 価格は税抜き（万円）")
+
+        EXCEL_PATH = r"C:\Users\shimo\OneDrive\デスクトップ\eff_app\エフフォーリア産駒 セリ結果.xlsx"
+
+        @st.cache_data
+        def load_seri_data(path):
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            grid = [[cell.value for cell in row] for row in ws.iter_rows()]
+            num_cols = len(grid[0]) if grid else 0
+
+            records = []
+            for base in range(1, num_cols, 3):
+                price_col = base + 1
+                current_sale = None
+
+                for row in grid:
+                    if base >= len(row):
+                        continue
+                    cell = str(row[base]).strip() if row[base] is not None else ""
+
+                    if re.search(r'セール\d{4}', cell):
+                        current_sale = cell
+                        continue
+
+                    if not cell or cell in ("馬名", "落札額(万円)", "平均", "※価格は税抜き"):
+                        continue
+                    if current_sale is None:
+                        continue
+
+                    price_raw = row[price_col] if price_col < len(row) else None
+                    if isinstance(price_raw, (int, float)):
+                        price = int(price_raw)
+                        display = f"{price:,}"
+                    elif price_raw in ("主取り", "欠場"):
+                        price = None
+                        display = str(price_raw)
+                    else:
+                        price = None
+                        display = "―"
+
+                    year_match = re.search(r'\d{4}', current_sale)
+                    sale_year = int(year_match.group()) if year_match else None
+
+                    records.append({
+                        "セール名":     current_sale,
+                        "セール年":     sale_year,
+                        "馬名":         cell,
+                        "落札額(万円)":  price,
+                        "表示額":       display,
+                    })
+
+            return pd.DataFrame(records)
+
+        try:
+            df_seri = load_seri_data(EXCEL_PATH)
+
+            years = sorted(df_seri["セール年"].dropna().unique().astype(int))
+            sel_year = st.selectbox("セール年度", years, index=len(years) - 1, key="seri_year")
+
+            df_year = df_seri[df_seri["セール年"] == sel_year]
+
+            for sale_name in df_year["セール名"].unique():
+                df_sale = df_year[df_year["セール名"] == sale_name].copy()
+                prices = df_sale["落札額(万円)"].dropna()
+
+                n    = len(df_sale)
+                avg  = f"{int(prices.mean()):,}" if len(prices) > 0 else "―"
+                high = f"{int(prices.max()):,}"  if len(prices) > 0 else "―"
+
+                st.markdown(
+                    f"**{sale_name}**　{n}頭　"
+                    f"平均 **{avg}** 万円　最高 **{high}** 万円"
+                )
+
+                disp = df_sale[["馬名", "表示額"]].rename(columns={"表示額": "落札額(万円)"})
+                st.dataframe(disp, use_container_width=True, hide_index=True)
+                st.markdown("---")
+
+        except Exception as e:
+            st.error(f"セリ結果の読み込みに失敗しました: {e}")
