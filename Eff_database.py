@@ -548,7 +548,12 @@ elif st.session_state.page == 'detail':
             SELECT r.race_date AS 開催日, r.race_name AS レース名, t.track_name AS 競馬場,
                    r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
-                   re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                   re.final_rank AS 着順,
+                   CASE WHEN re.time_seconds IS NULL THEN '―'
+                        ELSE CONCAT(FLOOR(re.time_seconds/60),':',
+                             LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
+                             TRUNCATE((re.time_seconds*10)%10,0))
+                   END AS タイム,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
@@ -1026,7 +1031,12 @@ else:
                                t.track_name AS 競馬場, t.course_direction AS コース方向,
                                r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
                                r.track_condition AS 馬場状態, r.race_class AS クラス,
-                               re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                               re.final_rank AS 着順,
+                               CASE WHEN re.time_seconds IS NULL THEN '―'
+                                    ELSE CONCAT(FLOOR(re.time_seconds/60),':',
+                                         LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
+                                         TRUNCATE((re.time_seconds*10)%10,0))
+                               END AS タイム,
                                re.running_style AS 脚質, re.race_pace AS レースペース,
                                re.Weight AS 斤量, re.harness AS 馬具,
                                j.jockey_name AS 騎手, tr.trainer_name AS 調教師, tr.region AS 調教師所属
@@ -1291,7 +1301,12 @@ else:
                    t.track_name AS 競馬場, t.course_direction AS コース方向,
                    r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
-                   re.final_rank AS 着順, re.time_seconds AS タイム_秒,
+                   re.final_rank AS 着順,
+                   CASE WHEN re.time_seconds IS NULL THEN '―'
+                        ELSE CONCAT(FLOOR(re.time_seconds/60),':',
+                             LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
+                             TRUNCATE((re.time_seconds*10)%10,0))
+                   END AS タイム,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
