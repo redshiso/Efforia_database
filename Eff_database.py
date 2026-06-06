@@ -550,13 +550,33 @@ elif st.session_state.page == 'detail':
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
                    re.final_rank AS 着順, re.time_seconds AS タイム_秒,
                    re.running_style AS 脚質, re.race_pace AS ペース,
-                   re.Weight AS 斤量, j.jockey_name AS 騎手, tr.trainer_name AS 調教師
+                   re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
+                   re.weight_diff AS 体重増減,
+                   j.jockey_name AS 騎手, tr.trainer_name AS 調教師
             FROM raceentries re
             JOIN races r ON re.race_id=r.race_id JOIN tracks t ON r.track_id=t.track_id
             LEFT JOIN jockeys j ON re.jockey_id=j.jockey_id
             LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
             WHERE re.horse_id=%s ORDER BY r.race_date DESC
         """, [horse_id])
+        if not df_entries.empty:
+            def fmt_weight(row):
+                w = row['馬体重_kg']
+                d = row['体重増減']
+                if pd.isna(w):
+                    return '―'
+                w = int(w)
+                if pd.isna(d):
+                    return str(w)
+                d = int(d)
+                sign = '+' if d >= 0 else ''
+                return f"{w}({sign}{d})"
+            df_entries.insert(
+                df_entries.columns.get_loc('体重増減') + 1,
+                '馬体重',
+                df_entries.apply(fmt_weight, axis=1)
+            )
+            df_entries = df_entries.drop(columns=['馬体重_kg', '体重増減'])
         if df_entries.empty: st.info("出走履歴がありません。")
         else: st.dataframe(df_entries, use_container_width=True, hide_index=True)
     except Exception as e:
@@ -923,7 +943,7 @@ else:
         st.subheader("産駒一覧")
         st.caption("馬名をクリックすると詳細ページに移動します")
         sc1,sc2 = st.columns([2,1])
-        sort_key   = sc1.selectbox("並び替え", ["生年月日","馬名"], key="sort_key")
+        sort_key   = sc1.selectbox("並び替え", ["生年月日","馬名","出走数","勝利数"], key="sort_key")
         sort_order = sc2.selectbox("順序", ["昇順 ↑","降順 ↓"], key="sort_order")
         sort_asc   = sort_order == "昇順 ↑"
 
@@ -1258,6 +1278,13 @@ else:
             jockey_input  = fj1.text_input("騎手名（部分一致）", key="cs_jockey")
             trainer_input = fj2.text_input("調教師名（部分一致）", key="cs_trainer")
 
+            fw1, fw2, fw3 = st.columns(3)
+            cs_weight_from = fw1.number_input("馬体重 From (kg)", min_value=0, max_value=700,
+                                              value=0, step=2, key="cs_weight_from")
+            cs_weight_to   = fw2.number_input("馬体重 To (kg)",   min_value=0, max_value=700,
+                                              value=700, step=2, key="cs_weight_to")
+            cs_weight_filter = fw3.checkbox("馬体重で絞り込む", value=False, key="cs_weight_filter")
+
         sql_cs = """
             SELECT h.horse_name AS 馬名, h.gender AS 性別,
                    r.race_date AS 開催日, r.race_name AS レース名,
@@ -1266,7 +1293,9 @@ else:
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
                    re.final_rank AS 着順, re.time_seconds AS タイム_秒,
                    re.running_style AS 脚質, re.race_pace AS ペース,
-                   re.Weight AS 斤量, j.jockey_name AS 騎手, tr.trainer_name AS 調教師
+                   re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
+                   re.weight_diff AS 体重増減,
+                   j.jockey_name AS 騎手, tr.trainer_name AS 調教師
             FROM raceentries re
             JOIN horses  h  ON re.horse_id=h.horse_id
             JOIN races   r  ON re.race_id=r.race_id
@@ -1304,10 +1333,31 @@ else:
             sql_cs += " AND j.jockey_name LIKE %s"; cs_params.append(f"%{jockey_input}%")
         if trainer_input:
             sql_cs += " AND tr.trainer_name LIKE %s"; cs_params.append(f"%{trainer_input}%")
+        if cs_weight_filter:
+            sql_cs += " AND re.horse_weight BETWEEN %s AND %s"
+            cs_params.extend([cs_weight_from, cs_weight_to])
         sql_cs += " ORDER BY r.race_date DESC"
 
         try:
             df_cs = run_query(sql_cs, cs_params)
+            if not df_cs.empty:
+                def fmt_cs_weight(row):
+                    w = row['馬体重_kg']
+                    d = row['体重増減']
+                    if pd.isna(w):
+                        return '―'
+                    w = int(w)
+                    if pd.isna(d):
+                        return str(w)
+                    d = int(d)
+                    sign = '+' if d >= 0 else ''
+                    return f"{w}({sign}{d})"
+                df_cs.insert(
+                    df_cs.columns.get_loc('体重増減') + 1,
+                    '馬体重',
+                    df_cs.apply(fmt_cs_weight, axis=1)
+                )
+                df_cs = df_cs.drop(columns=['馬体重_kg', '体重増減'])
             if df_cs.empty:
                 st.info("条件に合う出走記録が見つかりませんでした。")
             else:
