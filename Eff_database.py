@@ -81,6 +81,10 @@ def run_write(sql, params=None):
     cursor.execute(sql, params or [])
     conn.commit(); cursor.close(); conn.close()
 
+try:
+    run_write("ALTER TABLE horse_images ADD COLUMN photographer VARCHAR(100) DEFAULT NULL")
+except Exception:
+    pass  # 列がすでに存在する場合は無視
 
 # ─────────────────────────────────────────
 # 分析ノート
