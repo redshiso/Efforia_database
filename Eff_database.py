@@ -1,7 +1,9 @@
 import re
 import base64
+import io
 from pathlib import Path
 import streamlit as st
+from PIL import Image
 import mysql.connector
 import pandas as pd
 import altair as alt
@@ -58,6 +60,14 @@ db_config = {
 
 def get_connection():
     return mysql.connector.connect(**db_config)
+
+def compress_image(file_bytes, max_px=1920, quality=85):
+    img = Image.open(io.BytesIO(file_bytes))
+    img = img.convert("RGB")
+    img.thumbnail((max_px, max_px), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue(), "image/jpeg"
 
 def run_query(sql, params=None):
     conn = get_connection()
@@ -456,17 +466,35 @@ elif st.session_state.page == 'detail':
                 shozoku = '―'
 
             df_horse_img = run_query(
-                "SELECT image_data, mime_type FROM horse_images WHERE horse_id=%s", [horse_id]
+                "SELECT image_data, mime_type, photographer FROM horse_images WHERE horse_id=%s", [horse_id]
             )
             col_photo, col_info, col_blood = st.columns([2, 3, 3])
 
             with col_photo:
                 st.subheader("写真")
                 if not df_horse_img.empty:
-                    img_bytes = base64.b64decode(df_horse_img.iloc[0]['image_data'])
+                    img_row = df_horse_img.iloc[0]
+                    img_bytes = base64.b64decode(img_row['image_data'])
                     st.image(img_bytes, use_container_width=True)
+                    photographer = img_row.get('photographer') or ''
+                    if photographer:
+                        st.markdown(
+                            f"<div style='text-align:right; color:#888; font-size:0.8em;'>"
+                            f"📷 {photographer}</div>",
+                            unsafe_allow_html=True
+                        )
                     if st.session_state.is_admin:
-                        if st.button("写真を削除", key="del_horse_img"):
+                        new_photographer = st.text_input(
+                            "撮影者名", value=photographer, key="photographer_input"
+                        )
+                        col_save, col_del = st.columns(2)
+                        if col_save.button("撮影者を保存", key="save_photographer"):
+                            run_write(
+                                "UPDATE horse_images SET photographer=%s WHERE horse_id=%s",
+                                [new_photographer or None, horse_id]
+                            )
+                            st.rerun()
+                        if col_del.button("写真を削除", key="del_horse_img"):
                             run_write("DELETE FROM horse_images WHERE horse_id=%s", [horse_id])
                             st.rerun()
                 else:
@@ -481,11 +509,15 @@ elif st.session_state.page == 'detail':
                         uploaded_horse = st.file_uploader("写真をアップロード",
                                                            type=["png","jpg","jpeg","webp"],
                                                            key="horse_img_upload")
+                        photographer_input = st.text_input("撮影者名（任意）", key="photographer_new")
                         if uploaded_horse:
-                            img_b64 = base64.b64encode(uploaded_horse.read()).decode('utf-8')
+                            compressed, mime = compress_image(uploaded_horse.read())
+                            img_b64 = base64.b64encode(compressed).decode('utf-8')
                             run_write(
-                                "INSERT INTO horse_images (horse_id, image_data, mime_type) VALUES (%s,%s,%s)",
-                                [horse_id, img_b64, uploaded_horse.type]
+                                "INSERT INTO horse_images (horse_id, image_data, mime_type, photographer) "
+                                "VALUES (%s,%s,%s,%s)",
+                                [horse_id, img_b64, mime,
+                                 photographer_input or None]
                             )
                             st.rerun()
 
