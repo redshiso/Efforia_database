@@ -135,21 +135,26 @@ def render_overall_summary():
             COUNT(re.entry_id)                                                    AS 総出走数,
             COALESCE(SUM(CASE WHEN re.final_rank=1  THEN 1 ELSE 0 END),0)         AS 総勝利数,
             COALESCE(SUM(CASE WHEN re.final_rank<=3 THEN 1 ELSE 0 END),0)         AS 総複勝数,
-            COUNT(DISTINCT CASE WHEN re.entry_id IS NOT NULL THEN h.horse_id END) AS 出走経験頭数
+            COUNT(DISTINCT CASE WHEN re.entry_id IS NOT NULL THEN h.horse_id END) AS 出走経験頭数,
+            COUNT(DISTINCT CASE WHEN re.final_rank=1 THEN h.horse_id END)         AS 勝利経験頭数
         FROM horses h
         LEFT JOIN raceentries re ON h.horse_id=re.horse_id
         WHERE h.sire_id=222
     """)
     s = df.iloc[0]
-    total_starts = int(s['総出走数'])
-    wins         = int(s['総勝利数'])
-    placed       = int(s['総複勝数'])
-    c1,c2,c3,c4,c5 = st.columns(5)
+    total_starts  = int(s['総出走数'])
+    wins          = int(s['総勝利数'])
+    placed        = int(s['総複勝数'])
+    starters      = int(s['出走経験頭数'])
+    winners       = int(s['勝利経験頭数'])
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
     c1.metric("登録頭数",     f"{int(s['登録頭数'])}頭")
-    c2.metric("出走経験頭数", f"{int(s['出走経験頭数'])}頭")
+    c2.metric("出走経験頭数", f"{starters}頭")
     c3.metric("総出走数",     f"{total_starts}回")
-    c4.metric("勝率",         f"{wins/total_starts*100:.1f}%" if total_starts else "―")
-    c5.metric("複勝率",       f"{placed/total_starts*100:.1f}%" if total_starts else "―")
+    c4.metric("勝ち上がり率", f"{winners/starters*100:.1f}%" if starters else "―",
+              help=f"1勝以上した頭数 {winners}頭 ÷ 出走経験頭数 {starters}頭")
+    c5.metric("勝率",         f"{wins/total_starts*100:.1f}%" if total_starts else "―")
+    c6.metric("複勝率",       f"{placed/total_starts*100:.1f}%" if total_starts else "―")
 
 # ─────────────────────────────────────────
 # 産駒分析グラフ＋考察＋画像
@@ -586,9 +591,10 @@ elif st.session_state.page == 'detail':
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
                    re.final_rank AS 着順,
                    CASE WHEN re.time_seconds IS NULL THEN '―'
-                        ELSE CONCAT(FLOOR(re.time_seconds/60),':',
-                             LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
-                             TRUNCATE((re.time_seconds*10)%10,0))
+                        ELSE CONCAT(
+                            FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))/60),':',
+                            LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
+                            TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
@@ -1069,9 +1075,10 @@ else:
                                r.track_condition AS 馬場状態, r.race_class AS クラス,
                                re.final_rank AS 着順,
                                CASE WHEN re.time_seconds IS NULL THEN '―'
-                                    ELSE CONCAT(FLOOR(re.time_seconds/60),':',
-                                         LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
-                                         TRUNCATE((re.time_seconds*10)%10,0))
+                                    ELSE CONCAT(
+                                        FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))/60),':',
+                                        LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
+                                        TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                                END AS タイム,
                                re.running_style AS 脚質, re.race_pace AS レースペース,
                                re.Weight AS 斤量, re.harness AS 馬具,
@@ -1339,9 +1346,10 @@ else:
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
                    re.final_rank AS 着順,
                    CASE WHEN re.time_seconds IS NULL THEN '―'
-                        ELSE CONCAT(FLOOR(re.time_seconds/60),':',
-                             LPAD(FLOOR(re.time_seconds%60),2,'0'),'.',
-                             TRUNCATE((re.time_seconds*10)%10,0))
+                        ELSE CONCAT(
+                            FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))/60),':',
+                            LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
+                            TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
