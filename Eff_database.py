@@ -86,6 +86,11 @@ try:
 except Exception:
     pass  # 列がすでに存在する場合は無視
 
+try:
+    run_write("ALTER TABLE horses MODIFY COLUMN breeder_id INT DEFAULT NULL")
+except Exception:
+    pass  # すでにNULL許容の場合は無視
+
 # ─────────────────────────────────────────
 # 分析ノート
 # ─────────────────────────────────────────
@@ -889,13 +894,28 @@ else:
                 mime="text/csv",
                 key="dl_pre_template"
             )
+            st.caption("生産牧場名・父名は空欄でも登録できます。")
 
             uploaded_pre_csv = st.file_uploader(
-                "繁殖馬CSVをアップロード", type=["csv"], key="pre_csv_upload"
+                "繁殖馬ファイルをアップロード（CSV または Excel）",
+                type=["csv", "xlsx"], key="pre_csv_upload"
             )
             if uploaded_pre_csv:
                 try:
-                    df_pre = pd.read_csv(uploaded_pre_csv, encoding="utf-8-sig", dtype=str).fillna("")
+                    fname = uploaded_pre_csv.name
+                    if fname.endswith(".xlsx"):
+                        df_pre = pd.read_excel(uploaded_pre_csv, dtype=str, header=None)
+                        # 「馬名」が含まれる行をヘッダーとして使用
+                        header_idx = next(
+                            (i for i, row in df_pre.iterrows()
+                             if any(str(v) == "馬名" for v in row)),
+                            1
+                        )
+                        df_pre.columns = df_pre.iloc[header_idx]
+                        df_pre = df_pre.iloc[header_idx + 1:].reset_index(drop=True)
+                        df_pre = df_pre.fillna("").astype(str).replace("nan", "")
+                    else:
+                        df_pre = pd.read_csv(uploaded_pre_csv, encoding="utf-8-sig", dtype=str).fillna("")
                     st.write(f"読み込み: **{len(df_pre)} 頭**")
                     st.dataframe(df_pre, use_container_width=True, hide_index=True)
 
@@ -935,11 +955,6 @@ else:
                                             [b_name]
                                         )
                                         breeder_id = cur.lastrowid
-                                if not breeder_id:
-                                    errors.append(f"{h_name}：生産牧場名が未入力のためスキップ（breeder_idはNOT NULL）")
-                                    err += 1
-                                    continue
-
                                 # sire lookup (父、nullableなのでなければNULL)
                                 sire_id = None
                                 sire_name = r.get("父名", "").strip()
