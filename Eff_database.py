@@ -883,6 +883,94 @@ else:
             st.markdown("**繁殖馬・種牡馬登録**")
             st.caption("産駒CSVをインポートする前に、母・母父をここで先に登録してください。")
 
+            # リポジトリ内のExcelから直接インポート
+            _broodmare_path = Path(__file__).parent / "繁殖牝馬_2025_作業用.xlsx"
+            if _broodmare_path.exists():
+                st.markdown(f"📄 `繁殖牝馬_2025_作業用.xlsx` がリポジトリ内に見つかりました。")
+                if st.button("このファイルからインポート", key="import_from_file_btn"):
+                    try:
+                        df_file = pd.read_excel(_broodmare_path, dtype=str, header=None)
+                        header_idx = next(
+                            (i for i, row in df_file.iterrows()
+                             if any(str(v) == "馬名" for v in row)), 1
+                        )
+                        df_file.columns = df_file.iloc[header_idx]
+                        df_file = df_file.iloc[header_idx + 1:].reset_index(drop=True)
+                        df_file = df_file.fillna("").astype(str).replace("nan", "")
+
+                        conn = get_connection()
+                        cur  = conn.cursor()
+                        ok = skip = err = 0
+                        errors = []
+
+                        for _, r in df_file.iterrows():
+                            h_name = str(r.get("馬名", "")).strip()
+                            if not h_name or h_name == "nan":
+                                continue
+                            try:
+                                cur.execute(
+                                    "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                    [h_name]
+                                )
+                                if cur.fetchone():
+                                    skip += 1
+                                    continue
+
+                                b_name = str(r.get("生産牧場名", "")).strip()
+                                breeder_id = None
+                                if b_name and b_name != "nan":
+                                    cur.execute(
+                                        "SELECT breeder_id FROM breeders WHERE breeder_name=%s LIMIT 1",
+                                        [b_name]
+                                    )
+                                    row_b = cur.fetchone()
+                                    breeder_id = row_b[0] if row_b else None
+                                    if not breeder_id:
+                                        cur.execute(
+                                            "INSERT INTO breeders (breeder_name) VALUES (%s)",
+                                            [b_name]
+                                        )
+                                        breeder_id = cur.lastrowid
+
+                                sire_id = None
+                                sire_name = str(r.get("父名", "")).strip()
+                                if sire_name and sire_name != "nan":
+                                    cur.execute(
+                                        "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
+                                        [sire_name]
+                                    )
+                                    row_s = cur.fetchone()
+                                    sire_id = row_s[0] if row_s else None
+
+                                dob = str(r.get("生年月日", "")).strip()
+                                dob = None if not dob or dob == "nan" else dob
+
+                                cur.execute("""
+                                    INSERT INTO horses
+                                    (horse_name, date_of_birth, gender, color, sire_id, breeder_id)
+                                    VALUES (%s,%s,%s,%s,%s,%s)
+                                """, [
+                                    h_name, dob,
+                                    str(r.get("性別", "")).strip() or None,
+                                    str(r.get("毛色", "")).strip() or None,
+                                    sire_id, breeder_id
+                                ])
+                                ok += 1
+                            except Exception as row_err:
+                                err += 1
+                                errors.append(f"{h_name}：{row_err}")
+
+                        conn.commit()
+                        cur.close(); conn.close()
+                        if ok:    st.success(f"{ok} 頭を登録しました。")
+                        if skip:  st.info(f"{skip} 頭はすでに登録済みのためスキップしました。")
+                        if err:
+                            st.error(f"{err} 件でエラーが発生しました。")
+                            for msg in errors: st.error(msg)
+                    except Exception as e:
+                        st.error(f"インポートに失敗しました: {e}")
+            st.markdown("---")
+
             _pre_cols = ["馬名", "性別", "生年月日", "毛色", "生産牧場名", "父名"]
             _pre_csv  = ",".join(_pre_cols) + "\n" \
                 + ",".join(["サンプル母", "牝", "2018-04-10", "鹿毛",
