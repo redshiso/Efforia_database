@@ -202,7 +202,7 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
     df['複勝率(%)'] = (df['複勝数'] / df['出走数'] * 100).round(1)
     sort_order = df[col_alias].tolist()
 
-    metric = st.radio("表示指標", ["出走数","勝利数","勝率(%)","複勝率(%)"],
+    metric = st.radio("表示指標", ["勝利数","出走数","勝率(%)","複勝率(%)"],
                       horizontal=True, key=f"metric_{axis_key}")
     chart = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
         x=alt.X(f'{col_alias}:N', sort=sort_order, title=None,
@@ -721,14 +721,14 @@ else:
             # CSVテンプレートのダウンロード
             _template_cols = [
                 "馬名", "生年月日", "性別", "毛色",
-                "母名", "母父名",
+                "母名",
                 "調教師名", "所属",
                 "生産牧場名",
                 "馬主名", "血統"
             ]
             _template_csv = ",".join(_template_cols) + "\n" \
                 + ",".join(["サンプル花子", "2025-02-14", "牝", "鹿毛",
-                             "サンプル母", "ディープインパクト",
+                             "サンプル母",
                              "田中調教師", "美浦",
                              "〇〇牧場",
                              "田中オーナー", ""]) + "\n"
@@ -825,34 +825,18 @@ else:
                                             f"{horse_name}：母「{dam_name}」がDBに未登録（dam_id=NULL）"
                                         )
 
-                                # broodmare sire lookup (self-ref FK, nullable)
-                                bms_id = None
-                                bms_name = r.get("母父名", "").strip()
-                                if bms_name:
-                                    cur.execute(
-                                        "SELECT horse_id FROM horses WHERE horse_name=%s LIMIT 1",
-                                        [bms_name]
-                                    )
-                                    row = cur.fetchone()
-                                    if row:
-                                        bms_id = row[0]
-                                    else:
-                                        warnings_list.append(
-                                            f"{horse_name}：母父「{bms_name}」がDBに未登録（broodmare_sire_id=NULL）"
-                                        )
-
                                 dob = r.get("生年月日", "").strip() or None
                                 cur.execute("""
                                     INSERT INTO horses
                                     (horse_name, date_of_birth, gender, color,
-                                     sire_id, dam_id, broodmare_sire_id,
+                                     sire_id, dam_id,
                                      trainer_id, breeder_id, Owner, bloodline)
-                                    VALUES (%s,%s,%s,%s,222,%s,%s,%s,%s,%s,%s,%s)
+                                    VALUES (%s,%s,%s,%s,222,%s,%s,%s,%s,%s)
                                 """, [
                                     horse_name, dob,
                                     r.get("性別","").strip() or None,
                                     r.get("毛色","").strip() or None,
-                                    dam_id, bms_id,
+                                    dam_id,
                                     trainer_id, breeder_id,
                                     r.get("馬主名","").strip() or None,
                                     r.get("血統","").strip() or None
