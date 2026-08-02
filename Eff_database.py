@@ -1069,7 +1069,7 @@ else:
                     st.error(f"CSV読み込みエラー: {e}")
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "記事・コラム", "セリ結果"
+        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "産駒統計", "セリ結果"
     ])
 
     # ── TAB 1: 馬一覧 ──────────────────────────────
@@ -1544,38 +1544,90 @@ else:
         except Exception as e:
             st.error(f"検索に失敗しました: {e}")
 
-    # ── TAB 6: 記事・コラム ─────────────────────────
+    # ── TAB 6: 産駒統計 ─────────────────────────────
     with tab6:
-        st.subheader("エフフォーリア産駒に関する考察・コラム")
-        if st.session_state.is_admin:
-            st.caption("`{{image:ラベル}}` で画像挿入 / `{{graph:母父別}}` などでグラフ挿入")
-        st.markdown("---")
+        st.subheader("産駒統計")
+        st.caption("産年ごとの母父・生産地・毛色の分布を確認できます。")
+
         try:
-            dfa = run_query("""
-                SELECT article_id, title,
-                       DATE_FORMAT(created_at,'%Y-%m-%d %H:%i') AS post_date
-                FROM articles ORDER BY created_at DESC
+            df_years = run_query("""
+                SELECT DISTINCT YEAR(date_of_birth) AS yr
+                FROM horses
+                WHERE sire_id = 222 AND date_of_birth IS NOT NULL
+                ORDER BY yr DESC
             """)
-            if dfa.empty:
-                st.info("現在、掲載されている記事はありません。")
-            else:
-                for _, row in dfa.iterrows():
-                    aid = row['article_id']
-                    ct, cd, cb = st.columns([5, 2, 1])
-                    ct.button(row['title'], key=f"article_btn_{aid}",
-                              on_click=go_article, args=(aid,), use_container_width=True)
-                    cd.markdown(
-                        f"<div style='padding-top:8px;color:#888;font-size:0.85em'>{row['post_date']}</div>",
-                        unsafe_allow_html=True
-                    )
-                    if st.session_state.is_admin:
-                        if cb.button("削除", key=f"del_{aid}"):
-                            run_write("DELETE FROM article_images WHERE article_id=%s", [aid])
-                            run_write("DELETE FROM articles WHERE article_id=%s", [aid])
-                            st.rerun()
-                    st.markdown("---")
-        except Exception as e:
-            st.error(f"記事の読み込みに失敗しました: {e}")
+            year_list = [str(int(y)) for y in df_years['yr'].tolist()]
+        except Exception:
+            year_list = []
+
+        sy_col, _ = st.columns([1, 3])
+        stat_year = sy_col.selectbox("産年", ["全て"] + year_list, key="stat_year")
+
+        year_cond  = "" if stat_year == "全て" else "AND YEAR(h.date_of_birth) = %s"
+        year_param = [] if stat_year == "全て" else [int(stat_year)]
+
+        st.markdown("---")
+        sc1, sc2, sc3 = st.columns(3)
+
+        with sc1:
+            st.markdown("**母父**")
+            try:
+                df_bms = run_query(f"""
+                    SELECT
+                        COALESCE(bms.horse_name, '不明') AS 母父,
+                        COUNT(*) AS 頭数,
+                        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS 割合
+                    FROM horses h
+                    LEFT JOIN horses dam ON h.dam_id  = dam.horse_id
+                    LEFT JOIN horses bms ON dam.sire_id = bms.horse_id
+                    WHERE h.sire_id = 222
+                      AND h.date_of_birth IS NOT NULL
+                      {year_cond}
+                    GROUP BY bms.horse_name
+                    ORDER BY 頭数 DESC
+                """, year_param)
+                st.dataframe(df_bms, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"母父データの取得に失敗: {e}")
+
+        with sc2:
+            st.markdown("**生産地**")
+            try:
+                df_loc = run_query(f"""
+                    SELECT
+                        COALESCE(b.location, '不明') AS 生産地,
+                        COUNT(*) AS 頭数,
+                        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS 割合
+                    FROM horses h
+                    LEFT JOIN breeders b ON h.breeder_id = b.breeder_id
+                    WHERE h.sire_id = 222
+                      AND h.date_of_birth IS NOT NULL
+                      {year_cond}
+                    GROUP BY b.location
+                    ORDER BY 頭数 DESC
+                """, year_param)
+                st.dataframe(df_loc, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"生産地データの取得に失敗: {e}")
+
+        with sc3:
+            st.markdown("**毛色**")
+            try:
+                df_color = run_query(f"""
+                    SELECT
+                        COALESCE(h.color, '不明') AS 毛色,
+                        COUNT(*) AS 頭数,
+                        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS 割合
+                    FROM horses h
+                    WHERE h.sire_id = 222
+                      AND h.date_of_birth IS NOT NULL
+                      {year_cond}
+                    GROUP BY h.color
+                    ORDER BY 頭数 DESC
+                """, year_param)
+                st.dataframe(df_color, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"毛色データの取得に失敗: {e}")
 
     # ── TAB 7: セリ結果 ─────────────────────────────
     with tab7:
