@@ -1400,18 +1400,31 @@ else:
             style_sel    = fy3.multiselect("脚質", ["逃げ","先行","差し","追込"], key="cs_style")
 
             try:
-                df_tracks_opt = run_query("SELECT DISTINCT track_name FROM tracks ORDER BY track_name")
+                df_tracks_opt = run_query(
+                    "SELECT DISTINCT track_name, location FROM tracks ORDER BY track_name"
+                )
                 df_dir_opt    = run_query(
                     "SELECT DISTINCT course_direction FROM tracks WHERE course_direction IS NOT NULL ORDER BY course_direction"
                 )
                 track_options = df_tracks_opt['track_name'].tolist()
                 dir_options   = df_dir_opt['course_direction'].tolist()
             except Exception:
+                df_tracks_opt = pd.DataFrame(columns=['track_name','location'])
                 track_options = []
                 dir_options   = []
 
-            ft1, ft2 = st.columns(2)
-            track_sel = ft1.multiselect("競馬場", track_options, key="cs_track")
+            ft0, ft1, ft2 = st.columns(3)
+            category_sel = ft0.radio(
+                "開催区分", ["全て", "中央", "地方", "海外"],
+                horizontal=True, key="cs_category"
+            )
+            if category_sel == "全て":
+                filtered_tracks = track_options
+            else:
+                filtered_tracks = df_tracks_opt[
+                    df_tracks_opt['location'] == category_sel
+                ]['track_name'].tolist()
+            track_sel = ft1.multiselect("競馬場", filtered_tracks, key="cs_track")
             dir_sel   = ft2.multiselect("形態（コース方向）", dir_options, key="cs_dir")
 
             fj1, fj2 = st.columns(2)
@@ -1472,6 +1485,9 @@ else:
         if track_sel:
             sql_cs += f" AND t.track_name IN ({','.join(['%s']*len(track_sel))})"
             cs_params.extend(track_sel)
+        elif category_sel != "全て":
+            sql_cs += " AND t.location = %s"
+            cs_params.append(category_sel)
         if dir_sel:
             sql_cs += f" AND t.course_direction IN ({','.join(['%s']*len(dir_sel))})"
             cs_params.extend(dir_sel)
