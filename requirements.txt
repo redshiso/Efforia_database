@@ -1,4 +1,8 @@
-streamlit
-mysql-connector-python
-pandas
-openpyxl
+# 下限＝使用しているAPIの存在を保証 / 上限＝メジャー版の破壊的変更を止める
+# 完全固定ではないので、各系列内のバグ修正・セキュリティ修正は取り込まれます。
+streamlit>=1.57,<2              # width="stretch" に必要（use_container_width は廃止予定）
+altair>=5.5,<7                  # 直接 import しているため明示（streamlitの依存任せにしない）
+pandas>=2.0,<3                  # pandas 3 は生DBAPI接続の read_sql を落とす可能性あり
+mysql-connector-python>=9,<10
+openpyxl>=3.1,<4
+Pillow>=10,<12
