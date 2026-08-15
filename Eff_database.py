@@ -2,6 +2,7 @@ import re
 import base64
 import io
 from pathlib import Path
+from urllib.parse import urlencode
 import streamlit as st
 from PIL import Image
 import mysql.connector
@@ -69,27 +70,42 @@ def compress_image(file_bytes, max_px=1920, quality=85):
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue(), "image/jpeg"
 
-def run_query(sql, params=None):
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_query(sql, params):
     conn = get_connection()
-    df = pd.read_sql(sql, conn, params=params)
+    df = pd.read_sql(sql, conn, params=list(params) if params else None)
     conn.close()
     return df
+
+def run_query(sql, params=None):
+    # Streamlitは開いていないタブの中身も毎回実行するため、
+    # 同一クエリはキャッシュから返してDBへの往復を減らす
+    return _cached_query(sql, tuple(params) if params else ())
+
+def clear_query_cache():
+    _cached_query.clear()
 
 def run_write(sql, params=None):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(sql, params or [])
     conn.commit(); cursor.close(); conn.close()
+    clear_query_cache()
 
-try:
-    run_write("ALTER TABLE horse_images ADD COLUMN photographer VARCHAR(100) DEFAULT NULL")
-except Exception:
-    pass  # 列がすでに存在する場合は無視
+@st.cache_resource(show_spinner=False)
+def ensure_schema():
+    """スキーマ補正。プロセス起動時に一度だけ実行し、毎回のALTER発行を避ける。"""
+    for stmt in [
+        "ALTER TABLE horse_images ADD COLUMN photographer VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE horses MODIFY COLUMN breeder_id INT DEFAULT NULL",
+    ]:
+        try:
+            run_write(stmt)
+        except Exception:
+            pass  # 列がすでに存在する / すでにNULL許容の場合は無視
+    return True
 
-try:
-    run_write("ALTER TABLE horses MODIFY COLUMN breeder_id INT DEFAULT NULL")
-except Exception:
-    pass  # すでにNULL許容の場合は無視
+ensure_schema()
 
 # ─────────────────────────────────────────
 # 分析ノート
@@ -133,8 +149,11 @@ def delete_analysis_image(image_id):
 # ─────────────────────────────────────────
 # 産駒全体サマリー
 # ─────────────────────────────────────────
-def render_overall_summary():
-    df = run_query("""
+def render_overall_summary(category="全て"):
+    # 開催区分の絞り込みはサブクエリ側で行い、登録頭数は常に全産駒を数える
+    loc_cond   = "" if category == "全て" else "WHERE t.location = %s"
+    loc_params = []  if category == "全て" else [category]
+    df = run_query(f"""
         SELECT
             COUNT(DISTINCT h.horse_id)                                            AS 登録頭数,
             COUNT(re.entry_id)                                                    AS 総出走数,
@@ -143,9 +162,15 @@ def render_overall_summary():
             COUNT(DISTINCT CASE WHEN re.entry_id IS NOT NULL THEN h.horse_id END) AS 出走経験頭数,
             COUNT(DISTINCT CASE WHEN re.final_rank=1 THEN h.horse_id END)         AS 勝利経験頭数
         FROM horses h
-        LEFT JOIN raceentries re ON h.horse_id=re.horse_id
+        LEFT JOIN (
+            SELECT re.entry_id, re.horse_id, re.final_rank
+            FROM raceentries re
+            JOIN races  r ON re.race_id=r.race_id
+            JOIN tracks t ON r.track_id=t.track_id
+            {loc_cond}
+        ) re ON h.horse_id=re.horse_id
         WHERE h.sire_id=222
-    """)
+    """, loc_params)
     s = df.iloc[0]
     total_starts  = int(s['総出走数'])
     wins          = int(s['総勝利数'])
@@ -165,7 +190,7 @@ def render_overall_summary():
 # 産駒分析グラフ＋考察＋画像
 # ─────────────────────────────────────────
 def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
-                            foal_year_from=None, foal_year_to=None):
+                            foal_year_from=None, foal_year_to=None, category="全て"):
     axis_map = {
         '母父別':   ('hf.broodmare_sire_name', '母父'),
         '生産者別': ('hf.breeder_name',         '生産者'),
@@ -173,6 +198,8 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
         '馬主別':   ('re.owner',                 '馬主'),
     }
     col_expr, col_alias = axis_map[axis_key]
+    loc_cond   = "" if category == "全て" else "AND t.location = %s"
+    loc_params = []  if category == "全て" else [category]
     sql = f"""
         SELECT
             {col_expr}                                                       AS `{col_alias}`,
@@ -184,17 +211,19 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
         LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
         LEFT JOIN raceentries re       ON h.horse_id=re.horse_id
         LEFT JOIN races r              ON re.race_id=r.race_id
+        LEFT JOIN tracks t             ON r.track_id=t.track_id
         LEFT JOIN jockeys  j           ON re.jockey_id=j.jockey_id
         LEFT JOIN trainers tr          ON re.trainer_id=tr.trainer_id
         WHERE h.sire_id=222 AND {col_expr} IS NOT NULL
           AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
+          {loc_cond}
           {"AND YEAR(h.date_of_birth) BETWEEN " + str(foal_year_from) + " AND " + str(foal_year_to) if foal_year_from and foal_year_to else ""}
         GROUP BY {col_expr}
         HAVING 出走数 > 0
         ORDER BY 出走数 DESC
         LIMIT {top_n}
     """
-    df = run_query(sql)
+    df = run_query(sql, loc_params)
     if df.empty:
         st.info("データがありません。"); return
 
@@ -211,11 +240,11 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
         color=alt.Color(f'{metric}:Q', scale=alt.Scale(scheme='blues'), legend=None),
         tooltip=[col_alias,'頭数','出走数','勝利数','勝率(%)','複勝率(%)']
     ).properties(height=360)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
     with st.expander("詳細テーブル"):
         st.dataframe(df[[col_alias,'頭数','出走数','勝利数','複勝数','勝率(%)','複勝率(%)']],
-                     use_container_width=True, hide_index=True)
+                     hide_index=True)
 
     note = get_note(axis_key)
     if note:
@@ -230,7 +259,7 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
                 st.image(
                     f"data:{img_row['mime_type']};base64,{img_row['image_data']}",
                     caption=img_row['caption'] or "",
-                    use_container_width=True
+                    width="stretch"
                 )
                 if st.session_state.is_admin:
                     if st.button("削除", key=f"del_aimg_{img_row['image_id']}"):
@@ -300,7 +329,7 @@ def render_article_content(content, images_dict):
                     )
                 else:
                     img_bytes = base64.b64decode(img['data'])
-                    st.image(img_bytes, caption=img['caption'] or None, use_container_width=True)
+                    st.image(img_bytes, caption=img['caption'] or None, width="stretch")
             else:
                 st.warning(f"画像 '{{{{image:{label}}}}}' が見つかりません")
             continue
@@ -326,6 +355,8 @@ def go_detail(horse_id, horse_name):
 
 def go_list():
     st.session_state.page = 'list'
+    # 一覧テーブルの行選択を解除しておかないと、戻った瞬間に再び詳細へ飛んでしまう
+    st.session_state.pop('horse_table', None)
 
 def go_article(article_id):
     st.session_state.selected_article_id = article_id
@@ -334,6 +365,87 @@ def go_article(article_id):
 def go_list_article_tab():
     st.session_state.page = 'list'
     st.session_state.selected_article_id = None
+
+# ─────────────────────────────────────────
+# 条件検索のURL共有
+# 検索条件をクエリパラメータに載せ、URLだけで同じ条件を再現できるようにする
+# ─────────────────────────────────────────
+CS_OPTIONS = {
+    "surface":   ["芝", "ダート"],
+    "condition": ["良", "稍重", "重", "不良"],
+    "gender":    ["牡", "牝", "騸"],
+    "class":     ["新馬","未勝利","1勝クラス","2勝クラス","3勝クラス","オープン","G3","G2","G1"],
+    "style":     ["逃げ", "先行", "差し", "追込"],
+}
+CS_CATEGORIES = ["全て", "中央", "地方", "海外"]
+# track / dir は選択肢がDB由来のため、値の検証はウィジェット生成直前に行う
+CS_MULTI_PARAMS = list(CS_OPTIONS) + ["track", "dir"]
+CS_INT_RANGE = {
+    "dist_from":   (800, 4300), "dist_to":   (800, 4300),
+    "year_from":   (2020, 2030), "year_to":   (2020, 2030),
+    "weight_from": (0, 700),     "weight_to": (0, 700),
+}
+CS_DEFAULTS = {
+    "dist_from": 800,  "dist_to": 4300,
+    "year_from": 2024, "year_to": 2026,
+    "weight_from": 0,  "weight_to": 700,
+    "jockey": "", "trainer": "", "category": "全て",
+}
+
+def restore_search_from_url():
+    """URLのクエリパラメータを条件検索ウィジェットの初期値としてsession_stateへ復元する。"""
+    qp = st.query_params
+    restored = False
+    for name in CS_MULTI_PARAMS:
+        if name not in qp:
+            continue
+        vals = [v for v in qp.get_all(name) if v]
+        if name in CS_OPTIONS:                      # 不正な値はここで捨てる
+            vals = [v for v in vals if v in CS_OPTIONS[name]]
+        if vals:
+            st.session_state[f"cs_{name}"] = vals; restored = True
+    for name, (lo, hi) in CS_INT_RANGE.items():
+        if name not in qp:
+            continue
+        try:
+            st.session_state[f"cs_{name}"] = max(lo, min(hi, int(qp[name]))); restored = True
+        except ValueError:
+            pass                                    # 数値でなければ無視してデフォルトのまま
+    for name in ("jockey", "trainer"):
+        if name in qp:
+            st.session_state[f"cs_{name}"] = qp[name]; restored = True
+    if qp.get("category") in CS_CATEGORIES:
+        st.session_state["cs_category"] = qp["category"]; restored = True
+    if "weight_filter" in qp:
+        st.session_state["cs_weight_filter"] = qp["weight_filter"] == "1"; restored = True
+    return restored
+
+def sync_search_to_url():
+    """現在の検索条件をURLへ書き戻す。デフォルト値は省略してURLを短く保つ。"""
+    params = {}
+    for name in CS_MULTI_PARAMS:
+        vals = st.session_state.get(f"cs_{name}") or []
+        if vals:
+            params[name] = list(vals)
+    for name in list(CS_INT_RANGE) + ["jockey", "trainer", "category"]:
+        val = st.session_state.get(f"cs_{name}", CS_DEFAULTS[name])
+        if val not in (None, "") and val != CS_DEFAULTS[name]:
+            params[name] = str(val)
+    if st.session_state.get("cs_weight_filter"):
+        params["weight_filter"] = "1"
+    # 実際に変化したときだけ書き込む（毎回の書き換えを避ける）
+    encoded = urlencode(params, doseq=True)
+    if st.session_state.get("_cs_url") != encoded:
+        st.session_state["_cs_url"] = encoded
+        st.query_params.from_dict(params)
+
+def reset_search_conditions():
+    """検索条件をすべて初期値に戻し、URLからも条件を取り除く。"""
+    for name in CS_MULTI_PARAMS + list(CS_INT_RANGE) + \
+                ["jockey", "trainer", "category", "weight_filter"]:
+        st.session_state.pop(f"cs_{name}", None)
+    st.session_state.pop("_cs_url", None)
+    st.query_params.clear()
 
 # ══════════════════════════════════════════
 # 記事詳細ページ
@@ -489,7 +601,7 @@ elif st.session_state.page == 'detail':
                 if not df_horse_img.empty:
                     img_row = df_horse_img.iloc[0]
                     img_bytes = base64.b64decode(img_row['image_data'])
-                    st.image(img_bytes, use_container_width=True)
+                    st.image(img_bytes, width="stretch")
                     photographer = img_row.get('photographer') or ''
                     if photographer:
                         st.markdown(
@@ -601,6 +713,7 @@ elif st.session_state.page == 'detail':
                             LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
                             TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
+                   IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
@@ -630,7 +743,7 @@ elif st.session_state.page == 'detail':
             )
             df_entries = df_entries.drop(columns=['馬体重_kg', '体重増減'])
         if df_entries.empty: st.info("出走履歴がありません。")
-        else: st.dataframe(df_entries, use_container_width=True, hide_index=True)
+        else: st.dataframe(df_entries, hide_index=True)
     except Exception as e:
         st.error(f"出走履歴の取得に失敗しました: {e}")
 
@@ -748,7 +861,7 @@ else:
                 try:
                     df_csv = pd.read_csv(uploaded_csv, encoding="utf-8-sig", dtype=str).fillna("")
                     st.write(f"読み込み: **{len(df_csv)} 頭**")
-                    st.dataframe(df_csv, use_container_width=True, hide_index=True)
+                    st.dataframe(df_csv, hide_index=True)
 
                     if st.button("上記データを一括登録する", type="primary", key="bulk_insert_btn"):
                         conn = get_connection()
@@ -848,6 +961,7 @@ else:
 
                         conn.commit()
                         cur.close(); conn.close()
+                        clear_query_cache()
                         if ok:
                             st.success(f"{ok} 頭を登録しました。")
                         if skip:
@@ -946,6 +1060,7 @@ else:
 
                         conn.commit()
                         cur.close(); conn.close()
+                        clear_query_cache()
                         if ok:    st.success(f"{ok} 頭を登録しました。")
                         if skip:  st.info(f"{skip} 頭はすでに登録済みのためスキップしました。")
                         if err:
@@ -989,7 +1104,7 @@ else:
                     else:
                         df_pre = pd.read_csv(uploaded_pre_csv, encoding="utf-8-sig", dtype=str).fillna("")
                     st.write(f"読み込み: **{len(df_pre)} 頭**")
-                    st.dataframe(df_pre, use_container_width=True, hide_index=True)
+                    st.dataframe(df_pre, hide_index=True)
 
                     if st.button("上記データを一括登録する", type="primary", key="pre_insert_btn"):
                         conn = get_connection()
@@ -1057,6 +1172,7 @@ else:
 
                         conn.commit()
                         cur.close(); conn.close()
+                        clear_query_cache()
                         if ok:
                             st.success(f"{ok} 頭を登録しました。")
                         if skip:
@@ -1068,14 +1184,14 @@ else:
                 except Exception as e:
                     st.error(f"CSV読み込みエラー: {e}")
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "条件検索", "産駒統計", "セリ結果"
+    tab_search, tab_list, tab_race, tab_analysis, tab_custom, tab_stats, tab_auction = st.tabs([
+        "条件検索", "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "産駒統計", "セリ結果"
     ])
 
-    # ── TAB 1: 馬一覧 ──────────────────────────────
-    with tab1:
+    # ── TAB: 馬一覧 ────────────────────────────────
+    with tab_list:
         st.subheader("産駒一覧")
-        st.caption("馬名をクリックすると詳細ページに移動します")
+        st.caption("行を選択すると詳細ページに移動します（表の右上からCSVダウンロード・検索も可能です）")
         sc1,sc2 = st.columns([2,1])
         sort_key   = sc1.selectbox("並び替え", ["生年月日","馬名","出走数","勝利数"], key="sort_key")
         sort_order = sc2.selectbox("順序", ["昇順 ↑","降順 ↓"], key="sort_order")
@@ -1131,23 +1247,25 @@ else:
             st.write(f"検索結果: **{len(df_horses)}** 頭")
 
             if not df_horses.empty:
-                h0,h1,h2,h3,h4,h5 = st.columns([3,2,1,1,2,1])
-                h0.markdown("**馬名**"); h1.markdown("**生年月日**"); h2.markdown("**性別**")
-                h3.markdown("**毛色**"); h4.markdown("**母名**"); h5.markdown("**戦績**")
-                st.markdown("---")
-
-                for _, row in df_horses.iterrows():
-                    c0,c1,c2,c3,c4,c5 = st.columns([3,2,1,1,2,1])
-                    c0.button(row['馬名'], key=f"btn_{row['horse_id']}",
-                              on_click=go_detail, args=(row['horse_id'], row['馬名']))
-                    c1.write(str(row['生年月日'])); c2.write(row['性別'])
-                    c3.write(row['毛色'] or '―'); c4.write(row['母名'] or '―'); c5.write(row['戦績'])
+                # 1行ごとにボタンを並べると数百ウィジェットになり描画が重いため、
+                # 単一テーブル＋行選択で詳細ページへ遷移する
+                df_horses = df_horses.reset_index(drop=True)
+                df_view = df_horses[['馬名','生年月日','性別','毛色','母名','生産牧場','戦績']].fillna('―')
+                event = st.dataframe(
+                    df_view, hide_index=True,
+                    on_select="rerun", selection_mode="single-row", key="horse_table"
+                )
+                selected_rows = event.selection.rows
+                if selected_rows:
+                    picked = df_horses.iloc[selected_rows[0]]
+                    go_detail(int(picked['horse_id']), picked['馬名'])
+                    st.rerun()
 
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
 
-    # ── TAB 2: レース成績検索 ──────────────────────
-    with tab2:
+    # ── TAB: レース成績検索 ────────────────────────
+    with tab_race:
         st.subheader("馬名でレース成績を検索")
         sn = st.text_input("馬名を入力（部分一致）", value=horse_name_input, key="tab2_name")
         if st.button("成績を検索", type="primary"):
@@ -1167,6 +1285,7 @@ else:
                                         LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
                                         TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                                END AS タイム,
+                               IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
                                re.running_style AS 脚質, re.race_pace AS レースペース,
                                re.Weight AS 斤量, re.harness AS 馬具,
                                j.jockey_name AS 騎手, tr.trainer_name AS 調教師, tr.region AS 調教師所属
@@ -1191,20 +1310,26 @@ else:
                         m2.metric("連対率", f"{(w1+w2)/total*100:.1f}%")
                         m3.metric("複勝率", f"{(w1+w2+w3)/total*100:.1f}%")
                         m4.metric("3着内数",f"{w1+w2+w3}回")
-                        st.dataframe(dfr, use_container_width=True, hide_index=True)
+                        st.dataframe(dfr, hide_index=True)
                         st.subheader("競馬場別 出走数")
                         st.bar_chart(dfr['競馬場'].value_counts())
                 except Exception as e:
                     st.error(f"エラーが発生しました: {e}")
 
-    # ── TAB 3: 産駒分析 ────────────────────────────
-    with tab3:
+    # ── TAB: 産駒分析 ──────────────────────────────
+    with tab_analysis:
         st.subheader("産駒分析")
         st.caption("分析軸を切り替えて、エフフォーリア産駒の傾向を探りましょう")
+        analysis_category = st.radio(
+            "開催区分", ["全て", "中央", "地方", "海外"],
+            horizontal=True, key="analysis_category"
+        )
         try:
-            render_overall_summary()
+            render_overall_summary(category=analysis_category)
         except Exception as e:
             st.warning(f"サマリーの取得に失敗しました: {e}")
+        if analysis_category != "全て":
+            st.caption(f"※ 登録頭数は全産駒、それ以外の指標は「{analysis_category}」の成績のみで集計しています。")
         st.markdown("---")
 
         fc1, fc2 = st.columns(2)
@@ -1243,12 +1368,13 @@ else:
                                             year_from=analysis_year_from,
                                             year_to=analysis_year_to,
                                             foal_year_from=analysis_foal_from,
-                                            foal_year_to=analysis_foal_to)
+                                            foal_year_to=analysis_foal_to,
+                                            category=analysis_category)
                 except Exception as e:
                     st.error(f"分析データの取得に失敗しました: {e}")
 
-    # ── TAB 4: カスタム分析 ────────────────────────
-    with tab4:
+    # ── TAB: カスタム分析 ──────────────────────────
+    with tab_custom:
         st.subheader("カスタム分析")
         st.caption("X軸・指標・絞り込み条件を自由に組み合わせてグラフと表を生成します")
 
@@ -1360,20 +1486,26 @@ else:
                     y=alt.Y(f'{metric_label}:Q', title=metric_label),
                     tooltip=['軸', '出走数', '勝率(%)', '連対率(%)', '複勝率(%)']
                 ).properties(height=400)
-                st.altair_chart(chart, use_container_width=True)
+                st.altair_chart(chart, width="stretch")
 
                 st.dataframe(
                     df_custom[['軸','出走数','勝利数','連対数','3着内数','勝率(%)','連対率(%)','複勝率(%)']]
                     .rename(columns={'軸': axis_label}),
-                    use_container_width=True, hide_index=True
+                    hide_index=True
                 )
         except Exception as e:
             st.error(f"分析に失敗しました: {e}")
 
-    # ── TAB 5: 条件検索 ────────────────────────────
-    with tab5:
+    # ── TAB: 条件検索 ──────────────────────────────
+    with tab_search:
         st.subheader("条件を指定して戦績を検索")
         st.caption("複数の条件を組み合わせて出走履歴と統計を表示します。条件を指定しない項目は全て対象になります。")
+
+        # URLに条件が載っていれば、ウィジェットを作る前に復元しておく
+        if "cs_url_restored" not in st.session_state:
+            if restore_search_from_url():
+                st.info("URLの検索条件を復元しました。")
+            st.session_state.cs_url_restored = True
         st.markdown("---")
 
         with st.expander("絞り込み条件", expanded=True):
@@ -1424,6 +1556,13 @@ else:
                 filtered_tracks = df_tracks_opt[
                     df_tracks_opt['location'] == category_sel
                 ]['track_name'].tolist()
+            # 開催区分の切り替えやURL復元で、選択肢に無い値が残るとエラーになるため取り除く
+            for _key, _valid in (("cs_track", filtered_tracks), ("cs_dir", dir_options)):
+                _current = st.session_state.get(_key)
+                if _current:
+                    _kept = [v for v in _current if v in _valid]
+                    if _kept != _current:
+                        st.session_state[_key] = _kept
             track_sel = ft1.multiselect("競馬場", filtered_tracks, key="cs_track")
             dir_sel   = ft2.multiselect("形態（コース方向）", dir_options, key="cs_dir")
 
@@ -1438,6 +1577,14 @@ else:
                                               value=700, step=2, key="cs_weight_to")
             cs_weight_filter = fw3.checkbox("馬体重で絞り込む", value=False, key="cs_weight_filter")
 
+        sync_search_to_url()
+        share_col, reset_col = st.columns([5, 1])
+        share_col.caption(
+            "🔗 検索条件はURLに反映されます。ブラウザのアドレスバーをコピーすれば、"
+            "同じ条件をそのまま共有・ブックマークできます。"
+        )
+        reset_col.button("条件をリセット", key="cs_reset", on_click=reset_search_conditions)
+
         sql_cs = """
             SELECT h.horse_name AS 馬名, h.gender AS 性別,
                    r.race_date AS 開催日, r.race_name AS レース名,
@@ -1451,6 +1598,7 @@ else:
                             LPAD(FLOOR((re.time_seconds + COALESCE(re.time_diff_seconds,0))%60),2,'0'),'.',
                             TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
+                   IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
                    re.running_style AS 脚質, re.race_pace AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
@@ -1527,25 +1675,29 @@ else:
                 total = len(df_cs)
                 w1=int((rank_series==1).sum()); w2=int((rank_series==2).sum())
                 w3=int((rank_series==3).sum()); w4=int((rank_series>=4).sum())
+                starters = df_cs['馬名'].nunique()
+                winners  = df_cs.loc[rank_series==1, '馬名'].nunique()
                 st.markdown(
                     f"### {total}戦{w1}勝　"
                     f"<span style='font-size:1.1em; color:#555;'>({w1}-{w2}-{w3}-{w4})</span>",
                     unsafe_allow_html=True
                 )
-                m1,m2,m3,m4,m5 = st.columns(5)
+                m1,m2,m3,m4,m5,m6 = st.columns(6)
                 m1.metric("出走数",   f"{total}回")
-                m2.metric("勝率",    f"{w1/total*100:.1f}%")
-                m3.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
-                m4.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
-                m5.metric("3着内数", f"{w1+w2+w3}回")
+                m2.metric("勝ち上がり率", f"{winners/starters*100:.1f}%" if starters else "―",
+                          help=f"この条件で1勝以上した頭数 {winners}頭 ÷ この条件で出走した頭数 {starters}頭")
+                m3.metric("勝率",    f"{w1/total*100:.1f}%")
+                m4.metric("連対率",  f"{(w1+w2)/total*100:.1f}%")
+                m5.metric("複勝率",  f"{(w1+w2+w3)/total*100:.1f}%")
+                m6.metric("3着内数", f"{w1+w2+w3}回")
                 st.markdown("---")
                 st.subheader(f"出走履歴（{total}件）")
-                st.dataframe(df_cs, use_container_width=True, hide_index=True)
+                st.dataframe(df_cs, hide_index=True)
         except Exception as e:
             st.error(f"検索に失敗しました: {e}")
 
-    # ── TAB 6: 産駒統計 ─────────────────────────────
-    with tab6:
+    # ── TAB: 産駒統計 ───────────────────────────────
+    with tab_stats:
         st.subheader("産駒統計")
         st.caption("産年ごとの母父・生産地・毛色の分布を確認できます。")
 
@@ -1586,7 +1738,7 @@ else:
                     GROUP BY bms.horse_name
                     ORDER BY 頭数 DESC
                 """, year_param)
-                st.dataframe(df_bms, use_container_width=True, hide_index=True)
+                st.dataframe(df_bms, hide_index=True)
             except Exception as e:
                 st.error(f"母父データの取得に失敗: {e}")
 
@@ -1606,7 +1758,7 @@ else:
                     GROUP BY b.location
                     ORDER BY 頭数 DESC
                 """, year_param)
-                st.dataframe(df_loc, use_container_width=True, hide_index=True)
+                st.dataframe(df_loc, hide_index=True)
             except Exception as e:
                 st.error(f"生産地データの取得に失敗: {e}")
 
@@ -1625,12 +1777,12 @@ else:
                     GROUP BY h.color
                     ORDER BY 頭数 DESC
                 """, year_param)
-                st.dataframe(df_color, use_container_width=True, hide_index=True)
+                st.dataframe(df_color, hide_index=True)
             except Exception as e:
                 st.error(f"毛色データの取得に失敗: {e}")
 
-    # ── TAB 7: セリ結果 ─────────────────────────────
-    with tab7:
+    # ── TAB: セリ結果 ───────────────────────────────
+    with tab_auction:
         st.subheader("セリ結果")
         st.caption("※ 価格は税抜き（万円）")
 
@@ -1707,7 +1859,7 @@ else:
                 )
 
                 disp = df_sale[["馬名", "表示額"]].rename(columns={"表示額": "落札額(万円)"})
-                st.dataframe(disp, use_container_width=True, hide_index=True)
+                st.dataframe(disp, hide_index=True)
                 st.markdown("---")
 
         except Exception as e:
