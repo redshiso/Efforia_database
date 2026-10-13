@@ -1396,7 +1396,7 @@ else:
         ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
         axis_label   = ctrl1.selectbox(
             "X軸（集計軸）",
-            ['生産者', '母父', '騎手', '競馬場', '馬場種別', '馬場状態', 'クラス', '距離帯'],
+            ['生産者', '生産地', '母父', '騎手', '競馬場', '馬場種別', '馬場状態', 'クラス', '距離帯'],
             key="custom_axis"
         )
         metric_label = ctrl2.selectbox(
@@ -1427,6 +1427,11 @@ else:
                 select="COALESCE(b.breeder_name, '不明') AS 軸",
                 extra_join="LEFT JOIN breeders b ON h.breeder_id = b.breeder_id",
                 group="COALESCE(b.breeder_name, '不明')"
+            ),
+            '生産地': dict(
+                select="COALESCE(b.location, '不明') AS 軸",
+                extra_join="LEFT JOIN breeders b ON h.breeder_id = b.breeder_id",
+                group="COALESCE(b.location, '不明')"
             ),
             '母父': dict(
                 select="COALESCE(hf.broodmare_sire_name, '不明') AS 軸",
