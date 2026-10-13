@@ -370,10 +370,10 @@ def go_list_article_tab():
 # 条件検索のURL共有
 # 検索条件をクエリパラメータに載せ、URLだけで同じ条件を再現できるようにする
 # ─────────────────────────────────────────
+# 性別・生産地は「馬の属性」なのでサイドバー(sb_*)に一本化した
 CS_OPTIONS = {
     "surface":   ["芝", "ダート"],
     "condition": ["良", "稍重", "重", "不良"],
-    "gender":    ["牡", "牝", "騸"],
     "class":     ["新馬","未勝利","1勝クラス","2勝クラス","3勝クラス","オープン","G3","G2","G1"],
     "style":     ["逃げ", "先行", "差し", "追込"],
 }
@@ -391,6 +391,87 @@ CS_DEFAULTS = {
     "weight_from": 0,  "weight_to": 700,
     "jockey": "", "trainer": "", "category": "全て",
 }
+
+# ── サイドバー（産駒一覧の絞り込み）もURLに載せる ──
+#    条件検索タブ(cs_*)とキーがぶつからないよう sb_ 接頭辞で分ける
+#    color / loc / bms は選択肢がDB由来のため、値の検証はウィジェット生成直前に行う
+SB_MULTI_PARAMS = ["gender", "color", "region", "loc", "bms"]
+SB_REGIONS      = ["美浦", "栗東", "地方"]
+SB_GENDERS      = ["牡", "牝", "騸"]
+SB_INT_RANGE    = {"birth_from": (2000, 2040), "birth_to": (2000, 2040)}
+SB_DEFAULTS     = {"name": "", "birth_from": 2022, "birth_to": 2024}
+
+def build_horse_filter_sql(name, genders, year_from, year_to, colors, regions, locations, bms):
+    """サイドバー（馬の属性）の条件をSQL断片とパラメータに変換する。
+    呼び出し側のクエリに次のエイリアスがあることを前提とする:
+        h    = horses
+        hf   = horses_formatted  （母父で絞るとき）
+        b    = breeders          （生産地で絞るとき）
+        tr_h = trainers（馬の登録厩舎）（所属で絞るとき）
+    """
+    sql, params = "", []
+    if name:
+        sql += " AND h.horse_name LIKE %s"; params.append(f"%{name}%")
+    if genders:
+        sql += f" AND h.gender IN ({','.join(['%s']*len(genders))})"; params.extend(genders)
+    sql += " AND YEAR(h.date_of_birth) BETWEEN %s AND %s"; params.extend([year_from, year_to])
+    if colors:
+        sql += f" AND h.color IN ({','.join(['%s']*len(colors))})"; params.extend(colors)
+    if regions:
+        parts = []
+        if '美浦' in regions:
+            parts.append("tr_h.region = '美浦'")
+        if '栗東' in regions:
+            parts.append("tr_h.region = '栗東'")
+        if '地方' in regions:
+            parts.append("(tr_h.region IS NOT NULL AND tr_h.region NOT IN ('美浦', '栗東'))")
+        sql += f" AND ({' OR '.join(parts)})"
+    if locations:
+        sql += f" AND b.location IN ({','.join(['%s']*len(locations))})"; params.extend(locations)
+    if bms:
+        sql += f" AND hf.broodmare_sire_name IN ({','.join(['%s']*len(bms))})"; params.extend(bms)
+    return sql, params
+
+def keep_valid_selection(key, valid):
+    """URL復元や選択肢の切り替えで、選択肢に無い値が残るとエラーになるため取り除く。"""
+    current = st.session_state.get(key)
+    if current:
+        kept = [v for v in current if v in valid]
+        if kept != current:
+            st.session_state[key] = kept
+
+def restore_sidebar_from_url():
+    """URLのクエリパラメータをサイドバーのウィジェット初期値としてsession_stateへ復元する。"""
+    qp = st.query_params
+    restored = False
+    # 旧URL（性別・生産地が条件検索タブ側にあった頃）との互換
+    for old, new in (("gender", "sb_gender"), ("location", "sb_loc")):
+        if old in qp and new not in qp:
+            vals = [v for v in qp.get_all(old) if v]
+            if vals:
+                st.session_state[new] = vals; restored = True
+    for name in SB_MULTI_PARAMS:
+        key = f"sb_{name}"
+        if key not in qp:
+            continue
+        vals = [v for v in qp.get_all(key) if v]
+        if name == "region":                        # 固定選択肢はここで検証する
+            vals = [v for v in vals if v in SB_REGIONS]
+        elif name == "gender":
+            vals = [v for v in vals if v in SB_GENDERS]
+        if vals:
+            st.session_state[key] = vals; restored = True
+    for name, (lo, hi) in SB_INT_RANGE.items():
+        key = f"sb_{name}"
+        if key not in qp:
+            continue
+        try:
+            st.session_state[key] = max(lo, min(hi, int(qp[key]))); restored = True
+        except ValueError:
+            pass                                    # 数値でなければ無視してデフォルトのまま
+    if "sb_name" in qp:
+        st.session_state["sb_name"] = qp["sb_name"]; restored = True
+    return restored
 
 def restore_search_from_url():
     """URLのクエリパラメータを条件検索ウィジェットの初期値としてsession_stateへ復元する。"""
@@ -433,6 +514,17 @@ def sync_search_to_url():
             params[name] = str(val)
     if st.session_state.get("cs_weight_filter"):
         params["weight_filter"] = "1"
+    # サイドバー側の条件も同じURLに載せる（from_dictはURLを総入れ替えするため一緒に書く）
+    for name in SB_MULTI_PARAMS:
+        vals = st.session_state.get(f"sb_{name}") or []
+        if vals:
+            params[f"sb_{name}"] = list(vals)
+    # 産年の既定値はデータの範囲から決まるので、session_stateに置かれた実際の既定値と比べる
+    sb_defaults = {**SB_DEFAULTS, **st.session_state.get("_sb_year_defaults", {})}
+    for name in list(SB_INT_RANGE) + ["name"]:
+        val = st.session_state.get(f"sb_{name}", sb_defaults[name])
+        if val not in (None, "") and val != sb_defaults[name]:
+            params[f"sb_{name}"] = str(val)
     # 実際に変化したときだけ書き込む（毎回の書き換えを避ける）
     encoded = urlencode(params, doseq=True)
     if st.session_state.get("_cs_url") != encoded:
@@ -440,7 +532,8 @@ def sync_search_to_url():
         st.query_params.from_dict(params)
 
 def reset_search_conditions():
-    """検索条件をすべて初期値に戻し、URLからも条件を取り除く。"""
+    """条件検索タブの条件を初期値に戻す。
+    URLは一度空にするが、サイドバー側の条件は次回のsync時に書き戻されるので残る。"""
     for name in CS_MULTI_PARAMS + list(CS_INT_RANGE) + \
                 ["jockey", "trainer", "category", "weight_filter"]:
         st.session_state.pop(f"cs_{name}", None)
@@ -768,15 +861,41 @@ elif st.session_state.page == 'detail':
 else:
     st.title("エフフォーリア産駒データベース")
 
-    # サイドバー
+    # URLからの条件復元は、サイドバー・各タブのどのウィジェットより先に済ませる
+    if "cs_url_restored" not in st.session_state:
+        st.session_state.cs_url_restored = True
+        _restored_cs = restore_search_from_url()
+        _restored_sb = restore_sidebar_from_url()
+        if _restored_cs or _restored_sb:
+            st.info("URLの検索条件を復元しました。")
+    # 産年の既定値は登録されている産駒の範囲に合わせる。
+    # 固定値にすると、新しい産年が追加されたとき既定で除外されてしまうため。
+    try:
+        _yr = run_query(
+            "SELECT MIN(YEAR(date_of_birth)) AS y1, MAX(YEAR(date_of_birth)) AS y2 "
+            "FROM horses WHERE sire_id=222 AND date_of_birth IS NOT NULL"
+        ).iloc[0]
+        _year_defaults = {"birth_from": int(_yr['y1']), "birth_to": int(_yr['y2'])}
+    except Exception:
+        _year_defaults = {"birth_from": SB_DEFAULTS["birth_from"], "birth_to": SB_DEFAULTS["birth_to"]}
+    st.session_state["_sb_year_defaults"] = _year_defaults
+
+    # 既定値はウィジェットのvalue=ではなくsession_stateに持たせる
+    # （value= とsession_stateを併用するとStreamlitが警告を出すため）
+    for _k, _v in {**SB_DEFAULTS, **_year_defaults}.items():
+        st.session_state.setdefault(f"sb_{_k}", _v)
+
+    # サイドバー（馬の属性で絞る条件。全タブ共通で効く）
     st.sidebar.markdown("---")
-    st.sidebar.header("検索条件")
-    horse_name_input = st.sidebar.text_input("馬名（一部でも可）", value="")
-    selected_gender  = st.sidebar.radio("性別", ["すべて","牡","牝","騸"])
+    st.sidebar.header("産駒の絞り込み")
+    horse_name_input = st.sidebar.text_input("馬名（一部でも可）", key="sb_name")
+    selected_gender  = st.sidebar.multiselect("性別", SB_GENDERS, key="sb_gender")
     st.sidebar.markdown("**産年（生年）**")
     yc1,yc2 = st.sidebar.columns(2)
-    birth_year_from = yc1.number_input("From", min_value=2000, max_value=2040, value=2022, step=1)
-    birth_year_to   = yc2.number_input("To",   min_value=2000, max_value=2040, value=2024, step=1)
+    birth_year_from = yc1.number_input("From", min_value=2000, max_value=2040, step=1,
+                                       key="sb_birth_from")
+    birth_year_to   = yc2.number_input("To",   min_value=2000, max_value=2040, step=1,
+                                       key="sb_birth_to")
 
     try:
         color_df = run_query(
@@ -785,8 +904,9 @@ else:
         color_options = color_df['color'].tolist()
     except Exception:
         color_options = []
-    color_sel  = st.sidebar.multiselect("毛色", color_options)
-    region_sel = st.sidebar.multiselect("所属", ["美浦", "栗東", "地方"])
+    keep_valid_selection("sb_color", color_options)
+    color_sel  = st.sidebar.multiselect("毛色", color_options, key="sb_color")
+    region_sel = st.sidebar.multiselect("所属", SB_REGIONS, key="sb_region")
 
     try:
         loc_df = run_query(
@@ -797,7 +917,8 @@ else:
         location_options = loc_df['location'].tolist()
     except Exception:
         location_options = []
-    location_sel = st.sidebar.multiselect("生産地", location_options)
+    keep_valid_selection("sb_loc", location_options)
+    location_sel = st.sidebar.multiselect("生産地", location_options, key="sb_loc")
 
     try:
         bms_df = run_query(
@@ -809,10 +930,13 @@ else:
         bms_options = bms_df['broodmare_sire_name'].tolist()
     except Exception:
         bms_options = []
-    bms_sel = st.sidebar.multiselect("母父", bms_options)
+    keep_valid_selection("sb_bms", bms_options)
+    bms_sel = st.sidebar.multiselect("母父", bms_options, key="sb_bms")
 
     st.sidebar.markdown("---")
     st.sidebar.caption("※ 馬名は部分一致で検索します")
+    st.sidebar.caption("※ 産駒一覧・条件検索・レース成績検索の3タブに共通で効きます")
+    st.sidebar.caption("※ ここでの条件もURLに保存され、ブックマークから同じ状態で開けます")
 
     # 管理者メニュー
     st.sidebar.markdown("---")
@@ -1221,37 +1345,15 @@ else:
             FROM horses h
             LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
             LEFT JOIN raceentries re ON h.horse_id=re.horse_id
-            LEFT JOIN trainers tr ON h.trainer_id=tr.trainer_id
+            LEFT JOIN trainers tr_h ON h.trainer_id=tr_h.trainer_id
             LEFT JOIN breeders b ON h.breeder_id=b.breeder_id
             WHERE h.sire_id=222
         """
-        params = []
-        if horse_name_input:
-            sql += " AND h.horse_name LIKE %s"; params.append(f"%{horse_name_input}%")
-        if selected_gender != "すべて":
-            sql += " AND h.gender=%s"; params.append(selected_gender)
-        sql += " AND YEAR(h.date_of_birth) BETWEEN %s AND %s"
-        params.extend([birth_year_from, birth_year_to])
-        if color_sel:
-            sql += f" AND h.color IN ({','.join(['%s']*len(color_sel))})"
-            params.extend(color_sel)
-        if region_sel:
-            region_parts = []
-            if '美浦' in region_sel:
-                region_parts.append("tr.region = '美浦'")
-            if '栗東' in region_sel:
-                region_parts.append("tr.region = '栗東'")
-            if '地方' in region_sel:
-                region_parts.append(
-                    "(tr.region IS NOT NULL AND tr.region NOT IN ('美浦', '栗東'))"
-                )
-            sql += f" AND ({' OR '.join(region_parts)})"
-        if location_sel:
-            sql += f" AND b.location IN ({','.join(['%s']*len(location_sel))})"
-            params.extend(location_sel)
-        if bms_sel:
-            sql += f" AND hf.broodmare_sire_name IN ({','.join(['%s']*len(bms_sel))})"
-            params.extend(bms_sel)
+        _f, params = build_horse_filter_sql(
+            horse_name_input, selected_gender, birth_year_from, birth_year_to,
+            color_sel, region_sel, location_sel, bms_sel
+        )
+        sql += _f
         sql += " GROUP BY h.horse_id,h.horse_name,h.date_of_birth,h.gender,h.color,hf.dam_name,hf.breeder_name"
 
         try:
@@ -1288,6 +1390,11 @@ else:
                 st.warning("馬名を入力してください")
             else:
                 try:
+                    # 馬名はこのタブの入力を使い、それ以外の馬の属性はサイドバーの条件を適用する
+                    _rf, _rp = build_horse_filter_sql(
+                        None, selected_gender, birth_year_from, birth_year_to,
+                        color_sel, region_sel, location_sel, bms_sel
+                    )
                     dfr = run_query("""
                         SELECT h.horse_name AS 馬名, r.race_date AS 開催日, r.race_name AS レース名,
                                t.track_name AS 競馬場, t.course_direction AS コース方向,
@@ -1310,8 +1417,11 @@ else:
                         JOIN tracks t ON r.track_id=t.track_id
                         LEFT JOIN jockeys j ON re.jockey_id=j.jockey_id
                         LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
-                        WHERE h.sire_id=222 AND h.horse_name LIKE %s ORDER BY r.race_date DESC
-                    """, [f"%{sn}%"])
+                        LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
+                        LEFT JOIN breeders b ON h.breeder_id=b.breeder_id
+                        LEFT JOIN trainers tr_h ON h.trainer_id=tr_h.trainer_id
+                        WHERE h.sire_id=222 AND h.horse_name LIKE %s
+                    """ + _rf + " ORDER BY r.race_date DESC", [f"%{sn}%"] + _rp)
                     if dfr.empty:
                         st.info("該当する成績が見つかりませんでした。")
                     else:
@@ -1520,19 +1630,15 @@ else:
     with tab_search:
         st.subheader("条件を指定して戦績を検索")
         st.caption("複数の条件を組み合わせて出走履歴と統計を表示します。条件を指定しない項目は全て対象になります。")
+        st.caption("※ 性別・産年・毛色・所属・生産地・母父など、馬そのものを絞る条件はサイドバーで指定します。")
 
-        # URLに条件が載っていれば、ウィジェットを作る前に復元しておく
-        if "cs_url_restored" not in st.session_state:
-            if restore_search_from_url():
-                st.info("URLの検索条件を復元しました。")
-            st.session_state.cs_url_restored = True
+        # URLからの条件復元はサイドバーより前（ページ冒頭）で済ませている
         st.markdown("---")
 
-        with st.expander("絞り込み条件", expanded=True):
-            fc1, fc2, fc3 = st.columns(3)
+        with st.expander("絞り込み条件（レース側）", expanded=True):
+            fc1, fc2 = st.columns(2)
             surface_sel   = fc1.multiselect("馬場種別", ["芝","ダート"], key="cs_surface")
             condition_sel = fc2.multiselect("馬場状態", ["良","稍重","重","不良"], key="cs_condition")
-            gender_sel    = fc3.multiselect("性別", ["牡","牝","騸"], key="cs_gender")
 
             fd1, fd2, fd3 = st.columns(3)
             cs_dist_from = fd1.number_input("距離 From (m)", min_value=800, max_value=4300,
@@ -1577,12 +1683,8 @@ else:
                     df_tracks_opt['location'] == category_sel
                 ]['track_name'].tolist()
             # 開催区分の切り替えやURL復元で、選択肢に無い値が残るとエラーになるため取り除く
-            for _key, _valid in (("cs_track", filtered_tracks), ("cs_dir", dir_options)):
-                _current = st.session_state.get(_key)
-                if _current:
-                    _kept = [v for v in _current if v in _valid]
-                    if _kept != _current:
-                        st.session_state[_key] = _kept
+            keep_valid_selection("cs_track", filtered_tracks)
+            keep_valid_selection("cs_dir", dir_options)
             track_sel = ft1.multiselect("競馬場", filtered_tracks, key="cs_track")
             dir_sel   = ft2.multiselect("形態（コース方向）", dir_options, key="cs_dir")
 
@@ -1600,8 +1702,8 @@ else:
         sync_search_to_url()
         share_col, reset_col = st.columns([5, 1])
         share_col.caption(
-            "🔗 検索条件はURLに反映されます。ブラウザのアドレスバーをコピーすれば、"
-            "同じ条件をそのまま共有・ブックマークできます。"
+            "🔗 検索条件はサイドバーの絞り込みも含めてURLに反映されます。"
+            "ブラウザのアドレスバーをコピーすれば、同じ条件をそのまま共有・ブックマークできます。"
         )
         reset_col.button("条件をリセット", key="cs_reset", on_click=reset_search_conditions)
 
@@ -1629,11 +1731,22 @@ else:
             JOIN tracks  t  ON r.track_id=t.track_id
             LEFT JOIN jockeys  j  ON re.jockey_id=j.jockey_id
             LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
+            LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
+            LEFT JOIN breeders b  ON h.breeder_id=b.breeder_id
+            LEFT JOIN trainers tr_h ON h.trainer_id=tr_h.trainer_id
             WHERE h.sire_id=222
               AND r.distance_meters BETWEEN %s AND %s
               AND YEAR(r.race_date) BETWEEN %s AND %s
         """
         cs_params = [cs_dist_from, cs_dist_to, cs_year_from, cs_year_to]
+
+        # サイドバー（馬の属性）の条件をここにも適用する
+        _cf, _cp = build_horse_filter_sql(
+            horse_name_input, selected_gender, birth_year_from, birth_year_to,
+            color_sel, region_sel, location_sel, bms_sel
+        )
+        sql_cs += _cf
+        cs_params.extend(_cp)
 
         if surface_sel:
             sql_cs += f" AND r.surface_type IN ({','.join(['%s']*len(surface_sel))})"
@@ -1641,9 +1754,6 @@ else:
         if condition_sel:
             sql_cs += f" AND r.track_condition IN ({','.join(['%s']*len(condition_sel))})"
             cs_params.extend(condition_sel)
-        if gender_sel:
-            sql_cs += f" AND h.gender IN ({','.join(['%s']*len(gender_sel))})"
-            cs_params.extend(gender_sel)
         if class_sel:
             sql_cs += f" AND r.race_class IN ({','.join(['%s']*len(class_sel))})"
             cs_params.extend(class_sel)
