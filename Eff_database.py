@@ -573,8 +573,23 @@ elif st.session_state.page == 'detail':
                    ) AS 馬主,
                    hf.breeder_name AS 生産者,
                    hf.sire_name AS 父, hf.dam_name AS 母,
-                   hf.broodmare_sire_name AS 母父, hf.trainer_name AS 調教師,
-                   tr.region AS region_raw
+                   hf.broodmare_sire_name AS 母父,
+                   COALESCE(
+                       (SELECT tr2.trainer_name FROM raceentries re2
+                        JOIN races r2 ON re2.race_id = r2.race_id
+                        JOIN trainers tr2 ON re2.trainer_id = tr2.trainer_id
+                        WHERE re2.horse_id = hf.horse_id
+                        ORDER BY r2.race_date DESC LIMIT 1),
+                       hf.trainer_name
+                   ) AS 調教師,
+                   COALESCE(
+                       (SELECT tr2.region FROM raceentries re2
+                        JOIN races r2 ON re2.race_id = r2.race_id
+                        JOIN trainers tr2 ON re2.trainer_id = tr2.trainer_id
+                        WHERE re2.horse_id = hf.horse_id
+                        ORDER BY r2.race_date DESC LIMIT 1),
+                       tr.region
+                   ) AS region_raw
             FROM horses_formatted hf
             JOIN horses h ON hf.horse_id=h.horse_id
             LEFT JOIN trainers tr ON h.trainer_id = tr.trainer_id
