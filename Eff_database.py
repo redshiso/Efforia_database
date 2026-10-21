@@ -432,6 +432,19 @@ def build_horse_filter_sql(name, genders, year_from, year_to, colors, regions, l
         sql += f" AND hf.broodmare_sire_name IN ({','.join(['%s']*len(bms))})"; params.extend(bms)
     return sql, params
 
+def normalize_gender(value):
+    """CSVの性別表記を horses.gender のenum値（牡/牝/騸）に寄せる。
+    JRAの番組表は「せん」表記、他媒体は「セン」「センバ」などばらつくため。
+    （DBのenumは以前「騙」という誤字だったので、その表記も受け取っておく）"""
+    g = str(value or "").strip()
+    if g in ("せん", "セン", "騸", "騙", "せん馬", "セン馬", "騸馬", "騙馬", "去勢"):
+        return "騸"
+    if g in ("牡", "牡馬", "オス", "おす"):
+        return "牡"
+    if g in ("牝", "牝馬", "メス", "めす"):
+        return "牝"
+    return g or None
+
 def keep_valid_selection(key, valid):
     """URL復元や選択肢の切り替えで、選択肢に無い値が残るとエラーになるため取り除く。"""
     current = st.session_state.get(key)
@@ -1086,7 +1099,7 @@ else:
                                     VALUES (%s,%s,%s,%s,222,%s,%s,%s,%s,%s)
                                 """, [
                                     horse_name, dob,
-                                    r.get("性別","").strip() or None,
+                                    normalize_gender(r.get("性別")),
                                     r.get("毛色","").strip() or None,
                                     dam_id,
                                     trainer_id, breeder_id,
@@ -1188,7 +1201,7 @@ else:
                                     VALUES (%s,%s,%s,%s,%s,%s)
                                 """, [
                                     h_name, dob,
-                                    str(r.get("性別", "")).strip() or None,
+                                    normalize_gender(r.get("性別")),
                                     str(r.get("毛色", "")).strip() or None,
                                     sire_id, breeder_id
                                 ])
@@ -1300,7 +1313,7 @@ else:
                                     VALUES (%s,%s,%s,%s,%s,%s)
                                 """, [
                                     h_name, dob,
-                                    r.get("性別", "").strip() or None,
+                                    normalize_gender(r.get("性別")),
                                     r.get("毛色", "").strip() or None,
                                     sire_id, breeder_id
                                 ])
