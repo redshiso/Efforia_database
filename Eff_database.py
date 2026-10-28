@@ -835,7 +835,9 @@ elif st.session_state.page == 'detail':
                             TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
                    IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
-                   re.running_style AS 脚質, re.race_pace AS ペース,
+                   re.running_style AS 脚質,
+                   -- 手入力値があればそれを優先し、無ければW3から算出した判定を使う
+                   COALESCE(NULLIF(re.race_pace,'-'), rp.pace_class, '―') AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
                    j.jockey_name AS 騎手, tr.trainer_name AS 調教師
@@ -843,6 +845,7 @@ elif st.session_state.page == 'detail':
             JOIN races r ON re.race_id=r.race_id JOIN tracks t ON r.track_id=t.track_id
             LEFT JOIN jockeys j ON re.jockey_id=j.jockey_id
             LEFT JOIN trainers tr ON re.trainer_id=tr.trainer_id
+            LEFT JOIN race_pace rp ON rp.race_id = r.race_id
             WHERE re.horse_id=%s ORDER BY r.race_date DESC
         """, [horse_id])
         if not df_entries.empty:
@@ -1421,7 +1424,8 @@ else:
                                         TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                                END AS タイム,
                                IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
-                               re.running_style AS 脚質, re.race_pace AS レースペース,
+                               re.running_style AS 脚質,
+                               COALESCE(NULLIF(re.race_pace,'-'), rp.pace_class, '―') AS レースペース,
                                re.Weight AS 斤量, re.harness AS 馬具,
                                j.jockey_name AS 騎手, tr.trainer_name AS 調教師, tr.region AS 調教師所属
                         FROM raceentries re
@@ -1433,6 +1437,7 @@ else:
                         LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
                         LEFT JOIN breeders b ON h.breeder_id=b.breeder_id
                         LEFT JOIN trainers tr_h ON h.trainer_id=tr_h.trainer_id
+                        LEFT JOIN race_pace rp ON rp.race_id = r.race_id
                         WHERE h.sire_id=222 AND h.horse_name LIKE %s
                     """ + _rf + " ORDER BY r.race_date DESC", [f"%{sn}%"] + _rp)
                     if dfr.empty:
@@ -1734,7 +1739,8 @@ else:
                             TRUNCATE(((re.time_seconds + COALESCE(re.time_diff_seconds,0))*10)%10,0))
                    END AS タイム,
                    IFNULL(FORMAT(re.last_3f_seconds,1),'―') AS 上がり3F,
-                   re.running_style AS 脚質, re.race_pace AS ペース,
+                   re.running_style AS 脚質,
+                   COALESCE(NULLIF(re.race_pace,'-'), rp.pace_class, '―') AS ペース,
                    re.Weight AS 斤量, re.horse_weight AS 馬体重_kg,
                    re.weight_diff AS 体重増減,
                    j.jockey_name AS 騎手, tr.trainer_name AS 調教師
@@ -1747,6 +1753,7 @@ else:
             LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
             LEFT JOIN breeders b  ON h.breeder_id=b.breeder_id
             LEFT JOIN trainers tr_h ON h.trainer_id=tr_h.trainer_id
+            LEFT JOIN race_pace rp ON rp.race_id = r.race_id
             WHERE h.sire_id=222
               AND r.distance_meters BETWEEN %s AND %s
               AND YEAR(r.race_date) BETWEEN %s AND %s
