@@ -1413,7 +1413,7 @@ else:
                     )
                     dfr = run_query("""
                         SELECT h.horse_name AS 馬名, r.race_date AS 開催日, r.race_name AS レース名,
-                               t.track_name AS 競馬場, t.course_direction AS コース方向,
+                               t.track_name AS 競馬場,
                                r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
                                r.track_condition AS 馬場状態, r.race_class AS クラス,
                                re.final_rank AS 着順,
@@ -1728,7 +1728,7 @@ else:
         sql_cs = """
             SELECT h.horse_name AS 馬名, h.gender AS 性別,
                    r.race_date AS 開催日, r.race_name AS レース名,
-                   t.track_name AS 競馬場, t.course_direction AS コース方向,
+                   t.track_name AS 競馬場,
                    r.distance_meters AS 距離_m, r.surface_type AS 馬場種別,
                    r.track_condition AS 馬場状態, r.race_class AS クラス,
                    re.final_rank AS 着順,
@@ -1867,6 +1867,24 @@ else:
 
         year_cond  = "" if stat_year == "全て" else "AND YEAR(h.date_of_birth) = %s"
         year_param = [] if stat_year == "全て" else [int(stat_year)]
+
+        # 産年ごとの登録頭数。下の各表の母数にあたる
+        try:
+            df_year_counts = run_query("""
+                SELECT YEAR(date_of_birth) AS 産年, COUNT(*) AS 頭数
+                FROM horses
+                WHERE sire_id = 222 AND date_of_birth IS NOT NULL
+                GROUP BY YEAR(date_of_birth)
+                ORDER BY 産年
+            """)
+            if not df_year_counts.empty:
+                _yc_cols = st.columns(len(df_year_counts) + 1)
+                for _col, (_yr, _cnt) in zip(_yc_cols, df_year_counts.values):
+                    _col.metric(f"{int(_yr)}年産", f"{int(_cnt)}頭")
+                _yc_cols[-1].metric("合計", f"{int(df_year_counts['頭数'].sum())}頭")
+                st.caption("各産年の登録頭数。下の表の頭数を合計するとこの値になります。")
+        except Exception as e:
+            st.error(f"産年別頭数の取得に失敗: {e}")
 
         st.markdown("---")
         sc1, sc2, sc3 = st.columns(3)
