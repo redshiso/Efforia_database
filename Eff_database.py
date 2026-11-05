@@ -389,7 +389,7 @@ CS_DEFAULTS = {
     "dist_from": 800,  "dist_to": 4300,
     "year_from": 2024, "year_to": 2026,
     "weight_from": 0,  "weight_to": 700,
-    "jockey": "", "trainer": "", "category": "全て",
+    "jockey": "", "trainer": "", "breeder": "", "category": "全て",
 }
 
 # ── サイドバー（産駒一覧の絞り込み）もURLに載せる ──
@@ -505,7 +505,7 @@ def restore_search_from_url():
             st.session_state[f"cs_{name}"] = max(lo, min(hi, int(qp[name]))); restored = True
         except ValueError:
             pass                                    # 数値でなければ無視してデフォルトのまま
-    for name in ("jockey", "trainer"):
+    for name in ("jockey", "trainer", "breeder"):
         if name in qp:
             st.session_state[f"cs_{name}"] = qp[name]; restored = True
     if qp.get("category") in CS_CATEGORIES:
@@ -521,7 +521,7 @@ def sync_search_to_url():
         vals = st.session_state.get(f"cs_{name}") or []
         if vals:
             params[name] = list(vals)
-    for name in list(CS_INT_RANGE) + ["jockey", "trainer", "category"]:
+    for name in list(CS_INT_RANGE) + ["jockey", "trainer", "breeder", "category"]:
         val = st.session_state.get(f"cs_{name}", CS_DEFAULTS[name])
         if val not in (None, "") and val != CS_DEFAULTS[name]:
             params[name] = str(val)
@@ -548,7 +548,7 @@ def reset_search_conditions():
     """条件検索タブの条件を初期値に戻す。
     URLは一度空にするが、サイドバー側の条件は次回のsync時に書き戻されるので残る。"""
     for name in CS_MULTI_PARAMS + list(CS_INT_RANGE) + \
-                ["jockey", "trainer", "category", "weight_filter"]:
+                ["jockey", "trainer", "breeder", "category", "weight_filter"]:
         st.session_state.pop(f"cs_{name}", None)
     st.session_state.pop("_cs_url", None)
     st.query_params.clear()
@@ -1706,9 +1706,10 @@ else:
             track_sel = ft1.multiselect("競馬場", filtered_tracks, key="cs_track")
             dir_sel   = ft2.multiselect("形態（コース方向）", dir_options, key="cs_dir")
 
-            fj1, fj2 = st.columns(2)
+            fj1, fj2, fj3 = st.columns(3)
             jockey_input  = fj1.text_input("騎手名（部分一致）", key="cs_jockey")
             trainer_input = fj2.text_input("調教師名（部分一致）", key="cs_trainer")
+            breeder_input = fj3.text_input("生産者名（部分一致）", key="cs_breeder")
 
             fw1, fw2, fw3 = st.columns(3)
             cs_weight_from = fw1.number_input("馬体重 From (kg)", min_value=0, max_value=700,
@@ -1793,6 +1794,8 @@ else:
             sql_cs += " AND j.jockey_name LIKE %s"; cs_params.append(f"%{jockey_input}%")
         if trainer_input:
             sql_cs += " AND tr.trainer_name LIKE %s"; cs_params.append(f"%{trainer_input}%")
+        if breeder_input:
+            sql_cs += " AND b.breeder_name LIKE %s"; cs_params.append(f"%{breeder_input}%")
         if cs_weight_filter:
             sql_cs += " AND re.horse_weight BETWEEN %s AND %s"
             cs_params.extend([cs_weight_from, cs_weight_to])
