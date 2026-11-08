@@ -768,6 +768,42 @@ elif st.session_state.page == 'detail':
                             )
                             st.rerun()
 
+            # 取引価格。horse_prices が未作成でも基本情報が壊れないよう独立して取得する
+            try:
+                df_price = run_query("""
+                    SELECT price_type, amount_man, source, note
+                    FROM horse_prices WHERE horse_id=%s
+                    ORDER BY price_year DESC, price_id DESC
+                """, [horse_id])
+            except Exception:
+                df_price = pd.DataFrame(columns=['price_type','amount_man','source','note'])
+
+            def price_cell(kind):
+                """同じ区分の記録を新しい順に並べる。主取り→落札の履歴もそのまま出す。"""
+                rows = df_price[df_price['price_type'] == kind]
+                if rows.empty:
+                    return None
+                # 金額なしは、セリなら主取り等、募集なら総額が未発表のケース
+                blank = "未定" if kind == "募集" else "―"
+                out = []
+                for r in rows.itertuples(index=False):
+                    if pd.isna(r.amount_man):
+                        amount = r.note if r.note else blank
+                    else:
+                        amount = f"{int(r.amount_man):,}万円"
+                    out.append(f"{amount}"
+                               f"<span style='color:#888; font-size:0.85em;'>（{r.source}）</span>")
+                return "<br>".join(out)
+
+            price_html = ""
+            for _label, _kind in (("セリ価格", "セリ"), ("募集総額", "募集")):
+                _cell = price_cell(_kind)
+                if _cell:
+                    price_html += (
+                        f'<tr><td style="padding:4px 8px; color:#888;">{_label}</td>'
+                        f'<td style="padding:4px 8px;">{_cell}</td></tr>\n'
+                    )
+
             with col_info:
                 st.subheader("基本情報")
                 st.markdown(f"""
@@ -779,7 +815,7 @@ elif st.session_state.page == 'detail':
 <tr><td style="padding:4px 8px; color:#888;">生産者</td><td style="padding:4px 8px;">{p['生産者'] or '―'}</td></tr>
 <tr><td style="padding:4px 8px; color:#888;">調教師</td><td style="padding:4px 8px;">{p['調教師'] or '―'}</td></tr>
 <tr><td style="padding:4px 8px; color:#888;">所属</td><td style="padding:4px 8px;">{shozoku}</td></tr>
-</table>
+{price_html}</table>
 """, unsafe_allow_html=True)
 
             with col_blood:
