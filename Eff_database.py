@@ -238,7 +238,6 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
         GROUP BY {col_expr}
         HAVING 出走数 > 0
         ORDER BY 出走数 DESC
-        LIMIT {top_n}
     """
     df = run_query(sql, loc_params)
     if df.empty:
@@ -249,11 +248,29 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
 
     metric = st.radio("表示指標", ["勝利数","出走数","勝率(%)","複勝率(%)"],
                       horizontal=True, key=f"metric_{axis_key}")
-    # 選んだ指標の降順に並べる。同値のときは出走数が多い方を左に置く。
-    # 上位 top_n の抽出自体は出走数順（SQL側）のままにして、
-    # 1戦1勝で勝率100%といった小標本が上位を占めないようにしている。
-    df = df.sort_values([metric, '出走数'], ascending=[False, False])
+
+    # 上位の抽出も選んだ指標で行う。
+    # 出走数順で切ってしまうと、勝利数を見ているのに
+    # 「少ない出走で勝った区分」が落ちて目的を果たせないため。
+    is_rate = metric.endswith("(%)")
+    if is_rate:
+        # 率のときだけ母数の下限を設ける。1戦1勝=100% が上位を占めるのを防ぐ
+        min_runs = st.number_input(
+            "最低出走数", min_value=1, max_value=50, value=3, step=1,
+            key=f"minrun_{axis_key}",
+            help="この出走数に満たない区分を除外します。1戦1勝で勝率100%といった値が"
+                 "上位を占めるのを防ぐための下限です。"
+        )
+        df = df[df['出走数'] >= min_runs]
+        if df.empty:
+            st.info(f"最低出走数 {min_runs} を満たす区分がありません。値を下げてください。")
+            return
+
+    total_groups = len(df)
+    df = df.sort_values([metric, '出走数'], ascending=[False, False]).head(top_n)
     sort_order = df[col_alias].tolist()
+    if total_groups > len(df):
+        st.caption(f"全{total_groups}区分のうち、{metric}の上位{len(df)}件を表示しています。")
     chart = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
         x=alt.X(f'{col_alias}:N', sort=sort_order, title=None,
                 axis=alt.Axis(labelAngle=-40, labelOverlap=False)),
