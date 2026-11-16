@@ -184,18 +184,35 @@ def render_overall_summary(category="全て"):
     c4.metric("勝ち上がり率", f"{winners/starters*100:.1f}%" if starters else "―",
               help=f"1勝以上した頭数 {winners}頭 ÷ 出走経験頭数 {starters}頭")
     c5.metric("勝率",         f"{wins/total_starts*100:.1f}%" if total_starts else "―")
-    c6.metric("複勝率",       f"{placed/total_starts*100:.1f}%" if total_starts else "―")
+    c6.metric("勝ち上がり頭数", f"{winners}頭",
+              help="1勝以上を挙げた頭数")
 
 # ─────────────────────────────────────────
 # 産駒分析グラフ＋考察＋画像
 # ─────────────────────────────────────────
+# SMILE区分（国際セリ名簿基準委員会）。JRAのプレレーティングと同じ境界値を使う。
+#   S スプリント 1000〜1300m / M マイル 1301〜1899m / I インターミディエイト 1900〜2100m
+#   L ロング 2101〜2700m     / E エクステンデッド 2701m以上
+# 出走が無い行（LEFT JOIN で距離がNULL）は NULL を返し、呼び出し側の IS NOT NULL で落とす
+SMILE_CASE = """CASE WHEN r.distance_meters IS NULL   THEN NULL
+                      WHEN r.distance_meters <= 1300  THEN 'S(〜1300m)'
+                      WHEN r.distance_meters <= 1899  THEN 'M(1301〜1899m)'
+                      WHEN r.distance_meters <= 2100  THEN 'I(1900〜2100m)'
+                      WHEN r.distance_meters <= 2700  THEN 'L(2101〜2700m)'
+                      ELSE 'E(2701m〜)' END"""
+
+
 def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
                             foal_year_from=None, foal_year_to=None, category="全て"):
+    dist_band = SMILE_CASE
     axis_map = {
         '母父別':   ('hf.broodmare_sire_name', '母父'),
         '生産者別': ('hf.breeder_name',         '生産者'),
         '騎手別':   ('j.jockey_name',            '騎手'),
+        '調教師別': ('tr.trainer_name',          '調教師'),
         '馬主別':   ('re.owner',                 '馬主'),
+        '競馬場別': ('t.track_name',             '競馬場'),
+        '距離別':   (dist_band,                   '距離帯'),
     }
     col_expr, col_alias = axis_map[axis_key]
     loc_cond   = "" if category == "全て" else "AND t.location = %s"
@@ -229,10 +246,14 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
 
     df['勝率(%)']  = (df['勝利数'] / df['出走数'] * 100).round(1)
     df['複勝率(%)'] = (df['複勝数'] / df['出走数'] * 100).round(1)
-    sort_order = df[col_alias].tolist()
 
     metric = st.radio("表示指標", ["勝利数","出走数","勝率(%)","複勝率(%)"],
                       horizontal=True, key=f"metric_{axis_key}")
+    # 選んだ指標の降順に並べる。同値のときは出走数が多い方を左に置く。
+    # 上位 top_n の抽出自体は出走数順（SQL側）のままにして、
+    # 1戦1勝で勝率100%といった小標本が上位を占めないようにしている。
+    df = df.sort_values([metric, '出走数'], ascending=[False, False])
+    sort_order = df[col_alias].tolist()
     chart = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
         x=alt.X(f'{col_alias}:N', sort=sort_order, title=None,
                 axis=alt.Axis(labelAngle=-40, labelOverlap=False)),
@@ -245,6 +266,72 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
     with st.expander("詳細テーブル"):
         st.dataframe(df[[col_alias,'頭数','出走数','勝利数','複勝数','勝率(%)','複勝率(%)']],
                      hide_index=True)
+
+    # 距離軸だけは、区分にまとめる前の実距離の分布も見せる。
+    # 1区分あたりの出走が少なく率は読めないため、ここでは出走数だけを出す。
+    if axis_key == '距離別':
+        foal_cond = ("AND YEAR(h.date_of_birth) BETWEEN " + str(foal_year_from)
+                     + " AND " + str(foal_year_to)) if foal_year_from and foal_year_to else ""
+        dist_sql = f"""
+            SELECT r.distance_meters AS 距離, COUNT(*) AS 出走数,
+                   SUM(re.final_rank = 1)  AS 勝利数,
+                   SUM(re.final_rank <= 3) AS 複勝数
+            FROM horses h
+            JOIN raceentries re ON re.horse_id = h.horse_id
+            JOIN races  r ON r.race_id  = re.race_id
+            JOIN tracks t ON t.track_id = r.track_id
+            WHERE h.sire_id = 222
+              AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
+              {loc_cond}
+              {foal_cond}
+            GROUP BY r.distance_meters
+            ORDER BY r.distance_meters
+        """
+        try:
+            df_dist = run_query(dist_sql, loc_params)
+        except Exception as e:
+            st.error(f"距離分布の取得に失敗しました: {e}"); df_dist = pd.DataFrame()
+
+        if not df_dist.empty:
+            st.markdown("##### 実距離ごとの出走数")
+            st.caption("区分にまとめる前の分布。1距離あたりの出走が少ないため、ここでは率を出していません。")
+            hist = alt.Chart(df_dist).mark_bar(
+                cornerRadiusTopLeft=3, cornerRadiusTopRight=3
+            ).encode(
+                x=alt.X('距離:O', title='距離(m)',
+                        axis=alt.Axis(labelAngle=0, labelOverlap=False)),
+                y=alt.Y('出走数:Q', title='出走数'),
+                color=alt.Color('出走数:Q', scale=alt.Scale(scheme='blues'), legend=None),
+                tooltip=['距離', '出走数', '勝利数', '複勝数']
+            ).properties(height=240)
+            st.altair_chart(hist, width="stretch")
+
+            n   = int(df_dist['出走数'].sum())
+            tot = int((df_dist['距離'] * df_dist['出走数']).sum())
+            avg_run = tot / n if n else 0
+            m1, m2, m3 = st.columns(3)
+            m1.metric("平均出走距離", f"{avg_run:,.0f}m", help=f"全{n}走の平均")
+            for col, label, cond, note in (
+                (m2, "平均勝ち距離",  "re.final_rank = 1",  "1着になったレースの平均距離"),
+                (m3, "平均好走距離",  "re.final_rank <= 3", "3着内に入ったレースの平均距離"),
+            ):
+                try:
+                    r = run_query(f"""
+                        SELECT COUNT(*) AS n, ROUND(AVG(r.distance_meters), 1) AS 平均
+                        FROM horses h
+                        JOIN raceentries re ON re.horse_id = h.horse_id
+                        JOIN races  r ON r.race_id  = re.race_id
+                        JOIN tracks t ON t.track_id = r.track_id
+                        WHERE h.sire_id = 222 AND {cond}
+                          AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
+                          {loc_cond}
+                          {foal_cond}
+                    """, loc_params).iloc[0]
+                    cnt = int(r['n'])
+                    col.metric(label, f"{float(r['平均']):,.0f}m" if cnt else "―",
+                               help=f"{note}（n={cnt}）")
+                except Exception as e:
+                    col.metric(label, "―", help=str(e))
 
     note = get_note(axis_key)
     if note:
@@ -937,58 +1024,79 @@ else:
     for _k, _v in {**SB_DEFAULTS, **_year_defaults}.items():
         st.session_state.setdefault(f"sb_{_k}", _v)
 
-    # サイドバー（馬の属性で絞る条件。全タブ共通で効く）
-    st.sidebar.markdown("---")
-    st.sidebar.header("産駒の絞り込み")
-    horse_name_input = st.sidebar.text_input("馬名（一部でも可）", key="sb_name")
-    selected_gender  = st.sidebar.multiselect("性別", SB_GENDERS, key="sb_gender")
-    st.sidebar.markdown("**産年（生年）**")
-    yc1,yc2 = st.sidebar.columns(2)
-    birth_year_from = yc1.number_input("From", min_value=2000, max_value=2040, step=1,
-                                       key="sb_birth_from")
-    birth_year_to   = yc2.number_input("To",   min_value=2000, max_value=2040, step=1,
-                                       key="sb_birth_to")
+    # ── ナビゲーション（サイドバー最上部） ──
+    NAV_PAGES = ["ホーム", "産駒", "戦績検索", "分析", "セリ結果"]
+    nav = st.sidebar.radio("メニュー", NAV_PAGES, key="nav")
+    # 産駒の絞り込みが効くのはこの2ページだけ。他ページでは描画しない
+    FILTER_PAGES = ("産駒", "戦績検索")
 
-    try:
-        color_df = run_query(
-            "SELECT DISTINCT color FROM horses WHERE sire_id=222 AND color IS NOT NULL ORDER BY color"
-        )
-        color_options = color_df['color'].tolist()
-    except Exception:
-        color_options = []
-    keep_valid_selection("sb_color", color_options)
-    color_sel  = st.sidebar.multiselect("毛色", color_options, key="sb_color")
-    region_sel = st.sidebar.multiselect("所属", SB_REGIONS, key="sb_region")
+    if nav in FILTER_PAGES:
+        # サイドバー（馬の属性で絞る条件。全タブ共通で効く）
+        st.sidebar.markdown("---")
+        st.sidebar.header("産駒の絞り込み")
+        horse_name_input = st.sidebar.text_input("馬名（一部でも可）", key="sb_name")
+        selected_gender  = st.sidebar.multiselect("性別", SB_GENDERS, key="sb_gender")
+        st.sidebar.markdown("**産年（生年）**")
+        yc1,yc2 = st.sidebar.columns(2)
+        # 下限・上限を登録産駒の範囲に合わせる。
+        # 固定の2000だと、session_stateが失われたときに既定値が2000へ落ちてしまう
+        _y_lo, _y_hi = _year_defaults["birth_from"], _year_defaults["birth_to"]
+        birth_year_from = yc1.number_input("From", min_value=_y_lo, max_value=_y_hi, step=1,
+                                           key="sb_birth_from")
+        birth_year_to   = yc2.number_input("To",   min_value=_y_lo, max_value=_y_hi, step=1,
+                                           key="sb_birth_to")
 
-    try:
-        loc_df = run_query(
-            "SELECT DISTINCT b.location FROM horses h "
-            "JOIN breeders b ON h.breeder_id=b.breeder_id "
-            "WHERE h.sire_id=222 AND b.location IS NOT NULL ORDER BY b.location"
-        )
-        location_options = loc_df['location'].tolist()
-    except Exception:
+        try:
+            color_df = run_query(
+                "SELECT DISTINCT color FROM horses WHERE sire_id=222 AND color IS NOT NULL ORDER BY color"
+            )
+            color_options = color_df['color'].tolist()
+        except Exception:
+            color_options = []
+        keep_valid_selection("sb_color", color_options)
+        color_sel  = st.sidebar.multiselect("毛色", color_options, key="sb_color")
+        region_sel = st.sidebar.multiselect("所属", SB_REGIONS, key="sb_region")
+
+        try:
+            loc_df = run_query(
+                "SELECT DISTINCT b.location FROM horses h "
+                "JOIN breeders b ON h.breeder_id=b.breeder_id "
+                "WHERE h.sire_id=222 AND b.location IS NOT NULL ORDER BY b.location"
+            )
+            location_options = loc_df['location'].tolist()
+        except Exception:
+            location_options = []
+        keep_valid_selection("sb_loc", location_options)
+        location_sel = st.sidebar.multiselect("生産地", location_options, key="sb_loc")
+
+        try:
+            bms_df = run_query(
+                "SELECT DISTINCT hf.broodmare_sire_name FROM horses h "
+                "JOIN horses_formatted hf ON h.horse_id=hf.horse_id "
+                "WHERE h.sire_id=222 AND hf.broodmare_sire_name IS NOT NULL "
+                "ORDER BY hf.broodmare_sire_name"
+            )
+            bms_options = bms_df['broodmare_sire_name'].tolist()
+        except Exception:
+            bms_options = []
+        keep_valid_selection("sb_bms", bms_options)
+        bms_sel = st.sidebar.multiselect("母父", bms_options, key="sb_bms")
+
+        st.sidebar.markdown("---")
+        st.sidebar.caption("※ 馬名は部分一致で検索します")
+        st.sidebar.caption("※ 産駒一覧・条件検索・レース成績検索の3タブに共通で効きます")
+        st.sidebar.caption("※ ここでの条件もURLに保存され、ブックマークから同じ状態で開けます")
+    else:
+        # ウィジェットは描画しないが、保持されている条件はそのまま使う
+        horse_name_input = st.session_state.get("sb_name", "")
+        selected_gender  = st.session_state.get("sb_gender", [])
+        birth_year_from  = st.session_state.get("sb_birth_from", _year_defaults["birth_from"])
+        birth_year_to    = st.session_state.get("sb_birth_to", _year_defaults["birth_to"])
+        color_sel        = st.session_state.get("sb_color", [])
+        region_sel       = st.session_state.get("sb_region", [])
+        location_sel     = st.session_state.get("sb_loc", [])
+        bms_sel          = st.session_state.get("sb_bms", [])
         location_options = []
-    keep_valid_selection("sb_loc", location_options)
-    location_sel = st.sidebar.multiselect("生産地", location_options, key="sb_loc")
-
-    try:
-        bms_df = run_query(
-            "SELECT DISTINCT hf.broodmare_sire_name FROM horses h "
-            "JOIN horses_formatted hf ON h.horse_id=hf.horse_id "
-            "WHERE h.sire_id=222 AND hf.broodmare_sire_name IS NOT NULL "
-            "ORDER BY hf.broodmare_sire_name"
-        )
-        bms_options = bms_df['broodmare_sire_name'].tolist()
-    except Exception:
-        bms_options = []
-    keep_valid_selection("sb_bms", bms_options)
-    bms_sel = st.sidebar.multiselect("母父", bms_options, key="sb_bms")
-
-    st.sidebar.markdown("---")
-    st.sidebar.caption("※ 馬名は部分一致で検索します")
-    st.sidebar.caption("※ 産駒一覧・条件検索・レース成績検索の3タブに共通で効きます")
-    st.sidebar.caption("※ ここでの条件もURLに保存され、ブックマークから同じ状態で開けます")
 
     # 管理者メニュー
     st.sidebar.markdown("---")
@@ -1375,12 +1483,108 @@ else:
                 except Exception as e:
                     st.error(f"CSV読み込みエラー: {e}")
 
-    tab_search, tab_list, tab_race, tab_analysis, tab_custom, tab_stats, tab_auction = st.tabs([
-        "条件検索", "産駒一覧", "レース成績検索", "産駒分析", "カスタム分析", "産駒統計", "セリ結果"
-    ])
+    # ── サブページ選択（該当ページでのみ表示） ──
+    sub_horse = sub_analysis = None
+    if nav == "産駒":
+        sub_horse = st.radio("表示", ["産駒一覧", "馬名でレース成績検索"],
+                             horizontal=True, label_visibility="collapsed", key="sub_horse")
+    elif nav == "分析":
+        sub_analysis = st.radio("表示", ["産駒分析", "カスタム分析", "産駒統計"],
+                                horizontal=True, label_visibility="collapsed", key="sub_analysis")
+
+    # ── ホーム ──
+    if nav == "ホーム":
+        st.caption("2024年産・2025年産のエフフォーリア産駒を、未デビュー馬も含めて全頭追跡しています。")
+        home_cat = st.radio("開催区分", CS_CATEGORIES,
+                            horizontal=True, key="home_category")
+        # 区分の絞り込みは tracks.location で行う
+        _cat_cond  = "" if home_cat == "全て" else "AND t.location = %s"
+        _cat_param = []  if home_cat == "全て" else [home_cat]
+        try:
+            _tally = run_query(f"""
+                SELECT COUNT(*) AS 出走,
+                       SUM(re.final_rank = 1) AS 一着,
+                       SUM(re.final_rank = 2) AS 二着,
+                       SUM(re.final_rank = 3) AS 三着,
+                       SUM(re.final_rank > 3 OR re.final_rank IS NULL) AS 着外
+                FROM raceentries re
+                JOIN races  r ON r.race_id  = re.race_id
+                JOIN tracks t ON t.track_id = r.track_id
+                WHERE 1=1 {_cat_cond}
+            """, _cat_param).iloc[0]
+            _n  = int(_tally['出走'])
+            _r  = [int(_tally[k] or 0) for k in ('一着', '二着', '三着', '着外')]
+            if _n:
+                st.markdown(
+                    f"### {_n}戦{_r[0]}勝　"
+                    f"<span style='font-size:1.1em; color:#555;'>"
+                    f"({_r[0]}-{_r[1]}-{_r[2]}-{_r[3]})</span>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(f"### 出走なし　<span style='font-size:0.7em; color:#888;'>"
+                            f"（{home_cat}）</span>", unsafe_allow_html=True)
+        except Exception as e:
+            st.warning(f"通算成績の取得に失敗しました: {e}")
+        try:
+            render_overall_summary(category=home_cat)
+        except Exception as e:
+            st.warning(f"サマリーの取得に失敗しました: {e}")
+        try:
+            _wd = run_query(f"""
+                SELECT COUNT(*) AS n, ROUND(AVG(r.distance_meters), 1) AS 平均
+                FROM raceentries re
+                JOIN races  r ON r.race_id  = re.race_id
+                JOIN tracks t ON t.track_id = r.track_id
+                WHERE re.final_rank = 1 {_cat_cond}
+            """, _cat_param).iloc[0]
+            _wd_n = int(_wd['n'])
+            d1, _d2, _d3 = st.columns(3)
+            d1.metric("平均勝ち距離",
+                      f"{float(_wd['平均']):,.0f}m" if _wd_n else "―",
+                      help=f"1着になったレースの平均距離（n={_wd_n}）。"
+                           f"距離別の内訳は「分析 → 距離別」をご覧ください。")
+        except Exception as e:
+            st.warning(f"平均勝ち距離の取得に失敗しました: {e}")
+        if home_cat != "全て":
+            st.caption(f"※ 登録頭数は全産駒、それ以外の指標は「{home_cat}」の成績のみで集計しています。")
+        st.markdown("---")
+        home_l, home_r = st.columns([3, 2])
+        with home_l:
+            st.subheader("最新の結果")
+            try:
+                df_recent = run_query(f"""
+                    SELECT r.race_date AS 開催日, t.track_name AS 競馬場,
+                           r.race_name AS レース名, h.horse_name AS 馬名,
+                           re.final_rank AS 着順
+                    FROM raceentries re
+                    JOIN races  r ON r.race_id  = re.race_id
+                    JOIN tracks t ON t.track_id = r.track_id
+                    JOIN horses h ON h.horse_id = re.horse_id
+                    WHERE 1=1 {_cat_cond}
+                    ORDER BY r.race_date DESC, re.final_rank
+                    LIMIT 10
+                """, _cat_param)
+                if df_recent.empty:
+                    st.info(f"「{home_cat}」の出走記録はまだありません。")
+                else:
+                    st.dataframe(df_recent, hide_index=True)
+            except Exception as e:
+                st.error(f"最新結果の取得に失敗しました: {e}")
+        with home_r:
+            st.subheader("このサイトでできること")
+            st.markdown("""
+- **産駒** … 全頭の一覧と、馬名でのレース成績検索
+- **戦績検索** … 条件を組み合わせて検索。条件はURLで共有できます
+- **分析** … 母父・生産者・騎手別などの集計
+- **セリ結果** … 市場での落札額（募集総額は各馬の基本情報に掲載）
+""")
+            st.markdown("---")
+            st.markdown("最新情報は X で発信しています。")
+            st.markdown("[@Efforia_data](https://x.com/Efforia_data)")
 
     # ── TAB: 馬一覧 ────────────────────────────────
-    with tab_list:
+    if nav == "産駒" and sub_horse == "産駒一覧":
         st.subheader("産駒一覧")
         st.caption("行を選択すると詳細ページに移動します（表の右上からCSVダウンロード・検索も可能です）")
         sc1,sc2 = st.columns([2,1])
@@ -1434,7 +1638,7 @@ else:
             st.error(f"エラーが発生しました: {e}")
 
     # ── TAB: レース成績検索 ────────────────────────
-    with tab_race:
+    if nav == "産駒" and sub_horse == "馬名でレース成績検索":
         st.subheader("馬名でレース成績を検索")
         sn = st.text_input("馬名を入力（部分一致）", value=horse_name_input, key="tab2_name")
         if st.button("成績を検索", type="primary"):
@@ -1496,7 +1700,7 @@ else:
                     st.error(f"エラーが発生しました: {e}")
 
     # ── TAB: 産駒分析 ──────────────────────────────
-    with tab_analysis:
+    if nav == "分析" and sub_analysis == "産駒分析":
         st.subheader("産駒分析")
         st.caption("分析軸を切り替えて、エフフォーリア産駒の傾向を探りましょう")
         analysis_category = st.radio(
@@ -1528,13 +1732,19 @@ else:
                                                   value=2024, step=1, key="analysis_foal_to")
         st.markdown("---")
 
-        axis_tabs = st.tabs(["母父別", "生産者別", "騎手別", "馬主別"])
-        axes      = ["母父別", "生産者別", "騎手別", "馬主別"]
+        axes      = ["母父別", "生産者別", "騎手別", "調教師別",
+                     "馬主別", "競馬場別", "距離別"]
+        axis_tabs = st.tabs(axes)
         axis_desc = {
             "母父別":   "母父（ブルードメアサイアー）ごとの産駒傾向。どの血統との配合が成績に結びつきやすいかを確認できます。",
             "生産者別": "生産牧場ごとの産駒数・成績。どの牧場がエフフォーリア産駒を多く手がけているかを比較できます。",
             "騎手別":   "騎手ごとの騎乗成績。エフフォーリア産駒と相性の良い騎手を探しましょう。",
+            "調教師別": "調教師ごとの成績。各レース出走時点の調教師を基に集計します（転厩した馬は厩舎ごとに分かれます）。",
             "馬主別":   "馬主ごとの出走・勝利実績。各レースエントリー時点の馬主を基に集計します。",
+            "競馬場別": "競馬場ごとの成績。2歳戦は開催場が偏るため、得意不得意より「どこで多く使われたか」の反映である点に注意してください。",
+            "距離別":   "SMILE区分（S スプリント〜1300m／M マイル1301〜1899m／I インターミディエイト1900〜2100m／"
+                        "L ロング2101〜2700m／E エクステンデッド2701m〜）ごとの成績。"
+                        "番組編成の影響を受けるため、頭数の少ない区分は参考程度にご覧ください。",
         }
         for axis_tab, axis_key in zip(axis_tabs, axes):
             with axis_tab:
@@ -1553,14 +1763,15 @@ else:
                     st.error(f"分析データの取得に失敗しました: {e}")
 
     # ── TAB: カスタム分析 ──────────────────────────
-    with tab_custom:
+    if nav == "分析" and sub_analysis == "カスタム分析":
         st.subheader("カスタム分析")
         st.caption("X軸・指標・絞り込み条件を自由に組み合わせてグラフと表を生成します")
 
         ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
         axis_label   = ctrl1.selectbox(
             "X軸（集計軸）",
-            ['生産者', '生産地', '母父', '騎手', '競馬場', '馬場種別', '馬場状態', 'クラス', '距離帯'],
+            ['生産者', '生産地', '母父', '騎手', '競馬場', '馬場種別', '馬場状態', 'クラス',
+             '距離帯（SMILE）'],
             key="custom_axis"
         )
         metric_label = ctrl2.selectbox(
@@ -1611,18 +1822,11 @@ else:
             '馬場種別': dict(select="r.surface_type AS 軸",  extra_join="", group="r.surface_type"),
             '馬場状態': dict(select="r.track_condition AS 軸", extra_join="", group="r.track_condition"),
             'クラス':   dict(select="r.race_class AS 軸",    extra_join="", group="r.race_class"),
-            '距離帯': dict(
-                select="""CASE
-                    WHEN r.distance_meters < 1301 THEN '短距離(~1300m)'
-                    WHEN r.distance_meters < 1900 THEN 'マイル(1301~1899m)'
-                    WHEN r.distance_meters < 2101 THEN '中距離(1900~2100m)'
-                    ELSE '長距離(2101m~)' END AS 軸""",
+            # 産駒分析タブと同じ SMILE 区分を使う
+            '距離帯（SMILE）': dict(
+                select=SMILE_CASE + " AS 軸",
                 extra_join="",
-                group="""CASE
-                    WHEN r.distance_meters < 1301 THEN '短距離(~1300m)'
-                    WHEN r.distance_meters < 1900 THEN 'マイル(1301~1899m)'
-                    WHEN r.distance_meters < 2101 THEN '中距離(1900~2100m)'
-                    ELSE '長距離(2101m~)' END"""
+                group=SMILE_CASE
             ),
         }
 
@@ -1681,7 +1885,7 @@ else:
             st.error(f"分析に失敗しました: {e}")
 
     # ── TAB: 条件検索 ──────────────────────────────
-    with tab_search:
+    if nav == "戦績検索":
         st.subheader("条件を指定して戦績を検索")
         st.caption("複数の条件を組み合わせて出走履歴と統計を表示します。条件を指定しない項目は全て対象になります。")
         st.caption("※ 性別・産年・毛色・所属・生産地・母父など、馬そのものを絞る条件はサイドバーで指定します。")
@@ -1886,7 +2090,7 @@ else:
             st.error(f"検索に失敗しました: {e}")
 
     # ── TAB: 産駒統計 ───────────────────────────────
-    with tab_stats:
+    if nav == "分析" and sub_analysis == "産駒統計":
         st.subheader("産駒統計")
         st.caption("産年ごとの母父・生産地・毛色の分布を確認できます。")
 
@@ -1989,7 +2193,7 @@ else:
                 st.error(f"毛色データの取得に失敗: {e}")
 
     # ── TAB: セリ結果 ───────────────────────────────
-    with tab_auction:
+    if nav == "セリ結果":
         st.subheader("セリ結果")
         st.caption("※ 価格は税抜き（万円）")
 
@@ -2071,3 +2275,7 @@ else:
 
         except Exception as e:
             st.error(f"セリ結果の読み込みに失敗しました: {e}")
+
+    # 戦績検索ページ以外でも、サイドバー条件をURLへ反映しておく
+    if nav != "戦績検索":
+        sync_search_to_url()
