@@ -194,6 +194,15 @@ def render_overall_summary(category="全て"):
 #   S スプリント 1000〜1300m / M マイル 1301〜1899m / I インターミディエイト 1900〜2100m
 #   L ロング 2101〜2700m     / E エクステンデッド 2701m以上
 # 出走が無い行（LEFT JOIN で距離がNULL）は NULL を返し、呼び出し側の IS NOT NULL で落とす
+# 代表馬を決めるためのクラス序列。数字が大きいほど上位。
+# 新馬と未勝利は同格なので同じ値にし、同率は出走数→馬名の順で決める。
+CLASS_RANK_SQL = """CASE r.race_class
+                      WHEN 'G1' THEN 100 WHEN 'G2' THEN 90 WHEN 'G3' THEN 80
+                      WHEN 'リステッド' THEN 70 WHEN 'オープン' THEN 60
+                      WHEN '3勝クラス' THEN 50 WHEN '2勝クラス' THEN 40
+                      WHEN '1勝クラス' THEN 30
+                      WHEN '未勝利' THEN 20 WHEN '新馬' THEN 20 ELSE 10 END"""
+
 SMILE_CASE = """CASE WHEN r.distance_meters IS NULL   THEN NULL
                       WHEN r.distance_meters <= 1300  THEN 'S(〜1300m)'
                       WHEN r.distance_meters <= 1899  THEN 'M(1301〜1899m)'
@@ -246,6 +255,45 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
     df['勝率(%)']  = (df['勝利数'] / df['出走数'] * 100).round(1)
     df['複勝率(%)'] = (df['複勝数'] / df['出走数'] * 100).round(1)
 
+    # 代表馬＝その区分で最も上位のクラスを勝った馬。同率は出走数の多い順、次に馬名順。
+    # 勝ち鞍が無い区分は該当なしとする。
+    rep_sql = f"""
+        SELECT 軸, horse_name, best_class FROM (
+          SELECT {col_expr} AS 軸, h.horse_name AS horse_name,
+                 MAX(CASE WHEN re.final_rank=1 THEN {CLASS_RANK_SQL} END) AS cls,
+                 SUBSTRING_INDEX(GROUP_CONCAT(
+                     CASE WHEN re.final_rank=1 THEN r.race_class END
+                     ORDER BY {CLASS_RANK_SQL} DESC), ',', 1) AS best_class,
+                 COUNT(re.entry_id) AS starts
+          FROM horses h
+          LEFT JOIN horses_formatted hf ON h.horse_id=hf.horse_id
+          LEFT JOIN raceentries re       ON h.horse_id=re.horse_id
+          LEFT JOIN races r              ON re.race_id=r.race_id
+          LEFT JOIN tracks t             ON r.track_id=t.track_id
+          LEFT JOIN jockeys  j           ON re.jockey_id=j.jockey_id
+          LEFT JOIN trainers tr          ON re.trainer_id=tr.trainer_id
+          WHERE h.sire_id=222 AND {col_expr} IS NOT NULL
+            AND YEAR(r.race_date) BETWEEN {year_from} AND {year_to}
+            {loc_cond}
+            {"AND YEAR(h.date_of_birth) BETWEEN " + str(foal_year_from) + " AND " + str(foal_year_to) if foal_year_from and foal_year_to else ""}
+          GROUP BY {col_expr}, h.horse_id, h.horse_name
+        ) x
+        WHERE cls IS NOT NULL
+        ORDER BY 軸, cls DESC, starts DESC, horse_name
+    """
+    try:
+        rep = run_query(rep_sql, loc_params)
+        rep = rep.drop_duplicates(subset=['軸'], keep='first')
+        rep = rep.rename(columns={'軸': col_alias,
+                                  'horse_name': '代表馬',
+                                  'best_class': '最高クラス'})
+        df = df.merge(rep, on=col_alias, how='left')
+    except Exception:
+        df['代表馬'] = None
+        df['最高クラス'] = None
+    df['代表馬']     = df['代表馬'].fillna('―')
+    df['最高クラス'] = df['最高クラス'].fillna('―')
+
     metric = st.radio("表示指標", ["勝利数","出走数","勝率(%)","複勝率(%)"],
                       horizontal=True, key=f"metric_{axis_key}")
 
@@ -276,12 +324,16 @@ def render_analysis_section(axis_key, top_n=15, year_from=2024, year_to=2026,
                 axis=alt.Axis(labelAngle=-40, labelOverlap=False)),
         y=alt.Y(f'{metric}:Q', title=metric),
         color=alt.Color(f'{metric}:Q', scale=alt.Scale(scheme='blues'), legend=None),
-        tooltip=[col_alias,'頭数','出走数','勝利数','勝率(%)','複勝率(%)']
+        tooltip=[col_alias,'頭数','出走数','勝利数','勝率(%)','複勝率(%)',
+                 '代表馬','最高クラス']
     ).properties(height=360)
     st.altair_chart(chart, width="stretch")
+    st.caption("代表馬は、その区分で最も上位のクラスを勝った馬です"
+               "（同クラスなら出走数の多い馬、さらに同数なら馬名順）。")
 
     with st.expander("詳細テーブル"):
-        st.dataframe(df[[col_alias,'頭数','出走数','勝利数','複勝数','勝率(%)','複勝率(%)']],
+        st.dataframe(df[[col_alias,'頭数','出走数','勝利数','複勝数','勝率(%)','複勝率(%)',
+                         '代表馬','最高クラス']],
                      hide_index=True)
 
     # 距離軸だけは、区分にまとめる前の実距離の分布も見せる。
